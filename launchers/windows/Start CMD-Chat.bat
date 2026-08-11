@@ -1,14 +1,15 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-if exist "CMD-Chat.exe" (
-    start "" "CMD-Chat.exe"
-    exit /b 0
+
+if not exist "CMD-Chat.exe" (
+    echo.
+    echo CMD-Chat.exe was not found.
+    echo Make sure you extracted the entire CMD-Chat ZIP.
+    echo.
+    pause
+    exit /b 1
 )
-if exist "..\..\bin\cmd-chat.exe" (
-    start "" "..\..\bin\cmd-chat.exe"
-    exit /b 0
-)
-echo CMD-Chat.exe was not found.
-echo If you downloaded the source code, run scripts\install.py first.
-pause
+
+title CMD-Chat
+"%~dp0CMD-Chat.exe"
