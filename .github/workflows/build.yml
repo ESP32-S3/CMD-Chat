@@ -40,26 +40,31 @@ jobs:
             goarch: amd64
             binary: CMD-Chat.exe
             archive: CMD-Chat-Windows-x64.zip
+            launcher: launchers/windows/Start CMD-Chat.bat
           - name: macOS Intel
             goos: darwin
             goarch: amd64
             binary: CMD-Chat
             archive: CMD-Chat-macOS-Intel.zip
+            launcher: launchers/macos/Start CMD-Chat.command
           - name: macOS Apple Silicon
             goos: darwin
             goarch: arm64
             binary: CMD-Chat
             archive: CMD-Chat-macOS-Apple-Silicon.zip
+            launcher: launchers/macos/Start CMD-Chat.command
           - name: Linux x64
             goos: linux
             goarch: amd64
             binary: CMD-Chat
             archive: CMD-Chat-Linux-x64.zip
+            launcher: launchers/linux/Start-CMD-Chat.sh
           - name: Linux ARM64
             goos: linux
             goarch: arm64
             binary: CMD-Chat
             archive: CMD-Chat-Linux-arm64.zip
+            launcher: launchers/linux/Start-CMD-Chat.sh
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -69,7 +74,7 @@ jobs:
         with:
           go-version: '1.23.x'
           cache: true
-      - name: Build
+      - name: Build terminal application
         shell: bash
         env:
           GOOS: ${{ matrix.goos }}
@@ -77,17 +82,14 @@ jobs:
         run: |
           mkdir -p dist
           if [ "$GOOS" = "windows" ]; then
-            go build -trimpath -ldflags="-s -w -H=windowsgui" -o "dist/${{ matrix.binary }}" ./cmd/cmd-chat
+            go build -trimpath -ldflags="-s -w" -o "dist/${{ matrix.binary }}" ./cmd/cmd-chat
           else
             go build -trimpath -ldflags="-s -w" -o "dist/${{ matrix.binary }}" ./cmd/cmd-chat
           fi
-          cp README.md QUICKSTART.md dist/
-          if [ "$GOOS" = "windows" ]; then
-            cp "launchers/windows/Start CMD-Chat.bat" dist/
-          elif [ "$GOOS" = "darwin" ]; then
-            cp "launchers/macos/Start CMD-Chat.command" dist/
-          else
-            cp "launchers/linux/Start-CMD-Chat.sh" dist/
+          cp README.md dist/
+          cp docs/QUICKSTART.md dist/QUICKSTART.md
+          cp "${{ matrix.launcher }}" dist/
+          if [ "$GOOS" = "linux" ]; then
             chmod +x "dist/Start-CMD-Chat.sh" "dist/${{ matrix.binary }}"
           fi
           cd dist
