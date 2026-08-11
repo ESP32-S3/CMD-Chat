@@ -6,7 +6,7 @@
 
 If you downloaded a ready-to-run release, find:
 
-**`START CMD-CHAT.bat`**
+**`Start CMD-Chat.bat`**
 
 Double-click it.
 
@@ -50,6 +50,15 @@ Type:
 - The person who starts the chat temporarily hosts it from their own computer.
 - Same-Wi-Fi connections are usually the easiest.
 - If you're on different networks and it won't connect, a firewall or router may be blocking it.
+
+## macOS and Linux
+
+The release ZIP includes a launcher beside the `CMD-Chat` program:
+
+- **macOS:** `Start CMD-Chat.command`
+- **Linux:** `Start-CMD-Chat.sh`
+
+Run the launcher instead of hunting for the executable. The interface is still the terminal.
 
 ## If you downloaded the source code
 
