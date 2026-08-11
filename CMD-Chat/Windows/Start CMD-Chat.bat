@@ -2,9 +2,9 @@
 setlocal
 cd /d "%~dp0"
 
-if not exist "CMD-Chat.exe" (
+if not exist "Windows-x64-CMD-Chat.exe" (
     echo.
-    echo CMD-Chat.exe was not found.
+    echo Windows-x64-CMD-Chat.exe was not found.
     echo Make sure you extracted the complete CMD-Chat release ZIP.
     echo.
     pause
@@ -12,4 +12,4 @@ if not exist "CMD-Chat.exe" (
 )
 
 title CMD-Chat
-"%~dp0CMD-Chat.exe"
+"%~dp0Windows-x64-CMD-Chat.exe"
