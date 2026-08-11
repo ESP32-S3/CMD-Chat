@@ -40,31 +40,31 @@ jobs:
             goarch: amd64
             binary: CMD-Chat.exe
             archive: CMD-Chat-Windows-x64.zip
-            launcher: launchers/windows/Start CMD-Chat.bat
+            launcher: CMD-Chat/Windows/Start CMD-Chat.bat
           - name: macOS Intel
             goos: darwin
             goarch: amd64
             binary: CMD-Chat
             archive: CMD-Chat-macOS-Intel.zip
-            launcher: launchers/macos/Start CMD-Chat.command
+            launcher: CMD-Chat/macOS/Start CMD-Chat.command
           - name: macOS Apple Silicon
             goos: darwin
             goarch: arm64
             binary: CMD-Chat
             archive: CMD-Chat-macOS-Apple-Silicon.zip
-            launcher: launchers/macos/Start CMD-Chat.command
+            launcher: CMD-Chat/macOS/Start CMD-Chat.command
           - name: Linux x64
             goos: linux
             goarch: amd64
             binary: CMD-Chat
             archive: CMD-Chat-Linux-x64.zip
-            launcher: launchers/linux/Start-CMD-Chat.sh
+            launcher: CMD-Chat/Linux/Start-CMD-Chat.sh
           - name: Linux ARM64
             goos: linux
             goarch: arm64
             binary: CMD-Chat
             archive: CMD-Chat-Linux-arm64.zip
-            launcher: launchers/linux/Start-CMD-Chat.sh
+            launcher: CMD-Chat/Linux/Start-CMD-Chat.sh
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
