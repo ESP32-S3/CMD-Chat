@@ -95,8 +95,9 @@ jobs:
           if [ "${{ matrix.chromeos }}" = "true" ]; then
             cp clients/chromeos/cmd_chat.py dist/
           fi
+          launcher_file=$(basename "${{ matrix.launcher }}")
           if [ "$GOOS" = "linux" ] || [ "$GOOS" = "darwin" ]; then
-            chmod +x "dist/${{ matrix.binary }}" "dist/${{ matrix.launcher##*/ }}"
+            chmod +x "dist/${{ matrix.binary }}" "dist/$launcher_file"
           fi
           cd dist
           zip -9 -r "../${{ matrix.archive }}" .
