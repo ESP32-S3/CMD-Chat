@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CMD-Chat</title>
+<style>
+:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#171717;background:#f4f4f5}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center}.app{width:min(720px,92vw);background:white;border:1px solid #ddd;border-radius:18px;box-shadow:0 12px 40px #0001;padding:30px}.brand{font-size:30px;font-weight:800;margin-bottom:6px}.sub{color:#666;margin-bottom:26px}.card{border:1px solid #e2e2e2;border-radius:14px;padding:22px;margin:12px 0}.actions{display:grid;grid-template-columns:1fr 1fr;gap:14px}.btn{border:0;border-radius:12px;padding:16px;font-size:17px;font-weight:700;cursor:pointer;background:#18181b;color:white}.btn.secondary{background:#eee;color:#18181b}.btn:disabled{opacity:.5;cursor:not-allowed}.label{font-size:13px;color:#666;margin-bottom:7px}.id{font:600 20px ui-monospace,SFMono-Regular,monospace;background:#f4f4f5;padding:13px;border-radius:9px;word-break:break-all}.row{display:flex;gap:10px}.row input{flex:1}.input{width:100%;padding:13px;border:1px solid #ccc;border-radius:9px;font-size:16px}.status{margin-top:14px;color:#555;min-height:22px}.chat{height:330px;overflow:auto;background:#fafafa;border:1px solid #e5e5e5;border-radius:10px;padding:12px;margin:14px 0}.msg{padding:7px 4px}.msg .who{font-weight:700}.system{color:#777;font-size:14px;padding:5px}.send{display:flex;gap:8px}.send input{flex:1}.hidden{display:none}.small{font-size:13px;color:#777;margin-top:15px}.back{background:none;border:0;padding:0;color:#555;cursor:pointer}.error{color:#b42318}.success{color:#16794a}@media(max-width:600px){.actions{grid-template-columns:1fr}.app{padding:22px}}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="brand">CMD-Chat</div>
+  <div class="sub">Simple computer-to-computer chat. No account needed.</div>
+
+  <section id="home">
+    <div class="card">
+      <div class="label">Your ID</div>
+      <div class="id" id="myId">Loading...</div>
+      <button class="btn secondary" style="margin-top:10px" onclick="copyId()">Copy my ID</button>
+    </div>
+    <div class="actions">
+      <button class="btn" onclick="showHost()">Start a Chat</button>
+      <button class="btn" onclick="showJoin()">Join a Chat</button>
+    </div>
+    <div class="small">The person who starts the chat temporarily hosts it from their computer.</div>
+  </section>
+
+  <section id="host" class="hidden">
+    <button class="back" onclick="stopAndHome()">← Back</button>
+    <div class="card">
+      <h2>Start a Chat</h2>
+      <p>Send this code to your friend:</p>
+      <div class="id" id="hostId">Starting...</div>
+      <button class="btn secondary" style="margin-top:10px" onclick="copyHostId()">Copy code</button>
+      <div class="status" id="hostStatus">Starting your chat...</div>
+    </div>
+    <div id="hostChat" class="hidden">
+      <div class="chat" id="hostMessages"></div>
+      <div class="send"><input id="hostInput" class="input" placeholder="Type a message..." onkeydown="enterSend(event,'host')"><button class="btn" onclick="send('host')">Send</button></div>
+    </div>
+  </section>
+
+  <section id="join" class="hidden">
+    <button class="back" onclick="stopAndHome()">← Back</button>
+    <div class="card">
+      <h2>Join a Chat</h2>
+      <p>Enter your friend's CMD-Chat ID:</p>
+      <input id="joinId" class="input" placeholder="cc-..." autocomplete="off">
+      <button class="btn" style="margin-top:12px;width:100%" onclick="join()">Join</button>
+      <div class="status" id="joinStatus"></div>
+    </div>
+    <div id="joinChat" class="hidden">
+      <div class="chat" id="joinMessages"></div>
+      <div class="send"><input id="joinInput" class="input" placeholder="Type a message..." onkeydown="enterSend(event,'join')"><button class="btn" onclick="send('join')">Send</button></div>
+    </div>
+  </section>
+</div>
+<script>
+let lastLog=0,lastMode='',timer=null,hostId='';
+const $=id=>document.getElementById(id);
+async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});return r.json()}
+async function refresh(){try{const s=await api('/api/state');$('myId').textContent=s.id||'Unknown';if(s.logs.length>lastLog){for(let i=lastLog;i<s.logs.length;i++) renderLog(s.mode,s.logs[i]);lastLog=s.logs.length} if(s.mode==='host'&&s.id) $('hostId').textContent=s.id; if(s.running&&s.mode==='host') $('hostStatus').textContent=s.connected?'Connected.':'Waiting for your friend to connect...'; if(s.running&&s.mode==='join') $('joinStatus').textContent=s.connected?'Connected.':'Connecting...'; if(!s.running&&s.mode){$('hostStatus').textContent='Chat ended.';$('joinStatus').textContent='Chat ended.'}}catch(e){}}
+function renderLog(mode,line){if(!line.trim())return;const box=$(mode+'Messages');if(!box)return;let m=line.match(/^\[([^\]]+)\]\s(.*)$/);const div=document.createElement('div');if(m){div.className='msg';div.innerHTML='<span class="who"></span>: <span></span>';div.children[0].textContent=m[1];div.children[1].textContent=m[2]}else{div.className='system';div.textContent=line}box.appendChild(div);box.scrollTop=box.scrollHeight}
+function show(id){['home','host','join'].forEach(x=>$(x).classList.toggle('hidden',x!==id));}
+function showHost(){show('host');start('host')}
+function showJoin(){show('join');$('joinId').focus()}
+async function start(mode){lastLog=0;lastMode=mode;const r=await api('/api/start',{mode});if(!r.ok){$(mode+'Status').textContent=r.error||'Could not start chat.';return}timer=setInterval(refresh,500);refresh()}
+async function join(){const id=$('joinId').value.trim();if(!id)return;$('joinStatus').textContent='Connecting...';lastLog=0;lastMode='join';const r=await api('/api/start',{mode:'join',id});if(!r.ok){$('joinStatus').textContent=r.error||'Could not connect.';return}$('joinChat').classList.remove('hidden');timer=setInterval(refresh,500);refresh()}
+async function send(mode){const input=$(mode+'Input'),text=input.value.trim();if(!text)return;const r=await api('/api/send',{text});if(r.ok){renderLog(mode,'[You] '+text);input.value=''}else $(mode+'Status').textContent=r.error||'Message failed.'}
+function enterSend(e,mode){if(e.key==='Enter')send(mode)}
+async function stopAndHome(){if(timer)clearInterval(timer);timer=null;await api('/api/stop',{});show('home');$('hostChat').classList.add('hidden');$('joinChat').classList.add('hidden');$('hostMessages').innerHTML='';$('joinMessages').innerHTML='';lastLog=0}
+async function copyId(){await navigator.clipboard.writeText($('myId').textContent)}
+async function copyHostId(){await navigator.clipboard.writeText($('hostId').textContent)}
+refresh();
+</script>
+</body>
+</html>
