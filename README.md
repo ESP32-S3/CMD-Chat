@@ -280,7 +280,6 @@ CMD-Chat uses:
 - **Nonce-based authentication** to prevent simply claiming someone else's ID.
 - **Local peer-key pinning** so an already-trusted ID cannot silently switch to a different key.
 - Optional **TLS certificate fingerprint pinning** for an additional verification layer.
-
 - **Signed phonebook writes** so a listing can only be created, refreshed or removed by the holder of the matching private key.
 - **Signed relay joins**, bound to a specific session and role, so only the owner of an ID can wait for peers as that ID.
 - **End-to-end encryption across the relay**, so the fallback path is not a trusted party.
@@ -301,20 +300,109 @@ The core is written in Go and is intended to run on:
 
 A lightweight Python/Tkinter ChromeOS frontend is also included for the ChromeOS client architecture.
 
-## Build
+## Development
 
-Install Go 1.23+:
+Everything needed to build and run the whole system — client, both Cloudflare Workers, the D1
+migrations, and all tests — is in this repository. Nothing lives outside it except secrets.
+
+### Prerequisites
+
+- **Go 1.23+** for the client
+- **Node.js 22+** for the Workers (only if you are changing or deploying them)
+
+### The client
 
 ```bash
-go test ./...
-go build ./cmd/cmd-chat
+go test ./...            # all Go tests
+go vet ./...
+go build ./cmd/cmd-chat  # produces ./cmd-chat (or cmd-chat.exe on Windows)
 ```
 
-Or use the bootstrap script:
+Build a Windows executable, from any platform:
 
 ```bash
-python3 scripts/install.py
+GOOS=windows GOARCH=amd64 go build -o cmd-chat.exe ./cmd/cmd-chat
 ```
+
+On Windows, `go build -o cmd-chat.exe ./cmd/cmd-chat` is enough. There is also
+`python3 scripts/install.py` as a bootstrap script.
+
+Run it:
+
+```bash
+./cmd-chat            # interactive menu
+./cmd-chat host       # host a chat
+./cmd-chat join cc-XXXXXXXXXXXXXXXX
+```
+
+Two tests reach the deployed Workers and are **skipped by default**, so `go test ./...` is offline-safe.
+Opt in with:
+
+```bash
+CMD_CHAT_PHONEBOOK_INTEGRATION=1 go test ./internal/phonebook/
+CMD_CHAT_RELAY_INTEGRATION=1     go test ./internal/relay/
+```
+
+### The Workers
+
+Each Worker is self-contained and independently deployable from its own directory.
+
+```bash
+cd workers/phonebook     # or workers/relay
+npm install
+npm test                 # vitest, no Cloudflare account needed
+npx wrangler dev         # run locally
+```
+
+The phonebook needs a local secret before `wrangler dev`:
+
+```bash
+cd workers/phonebook
+cp .dev.vars.example .dev.vars   # put any random value in IP_HASH_SALT
+npx wrangler d1 migrations apply cmd-chat-phonebook --local
+```
+
+### Deploying
+
+Deployment is deliberate and manual; CI never deploys.
+
+```bash
+cd workers/phonebook
+npx wrangler secret put IP_HASH_SALT                          # first time only
+npx wrangler d1 migrations apply cmd-chat-phonebook --remote  # only if migrations changed
+npx wrangler deploy
+```
+
+```bash
+cd workers/relay
+npx wrangler deploy
+```
+
+Schema changes go in `workers/phonebook/migrations/` as a new numbered file — never as ad-hoc SQL
+against production.
+
+### Pointing the client at your own Workers
+
+The two URLs are defined once (`internal/phonebook` and `internal/relay`) and are never repeated
+elsewhere in the Go source. Override either without rebuilding:
+
+| Variable                  | Default                                            |
+| ------------------------- | -------------------------------------------------- |
+| `CMD_CHAT_PHONEBOOK_URL`  | `https://cmd-chat-phonebook.cmd-chat.workers.dev`  |
+| `CMD_CHAT_RELAY_URL`      | `https://cmd-chat-relay.cmd-chat.workers.dev`      |
+
+`cmd-chat help` prints whichever URLs are actually in effect. To pin one transport while diagnosing a
+connection problem:
+
+```bash
+CMD_CHAT_TRANSPORT=lan|direct|relay cmd-chat join cc-XXXXXXXXXXXXXXXX
+```
+
+### What must never be committed
+
+`.gitignore` enforces this, but to be explicit: no Cloudflare API tokens, no `.dev.vars`, no
+`identity.json` or `trusted_peers.json` (they hold your private key and pinned peer keys), and no
+`node_modules/`. Worker secrets are set with `wrangler secret put`.
 
 ## Basic usage
 
@@ -371,20 +459,34 @@ Leave a chat with:
 ```text
 cmd/cmd-chat/        the terminal application
 clients/chromeos/    ChromeOS terminal-style frontend
+
 internal/chat/       chat connections and message protocol
 internal/auth/       peer authentication and trust
 internal/identity/   persistent device identity
 internal/discovery/  LAN host discovery
-internal/phonebook/  public rendezvous directory client (Cloudflare Worker + D1)
-internal/relay/      encrypted fallback transport client (Cloudflare Worker + Durable Object)
 internal/connect/    connection strategy: LAN, then direct, then relay
+internal/phonebook/  client for the rendezvous directory
+internal/relay/      client for the fallback transport
 internal/network/    connectivity and NAT-related networking
 internal/ipc/        local ChromeOS-to-Go bridge
+
+workers/phonebook/   Cloudflare Worker + D1 rendezvous directory
+  src/               request handling, validation, signature verification
+  migrations/        D1 schema, applied with wrangler
+  test/              vitest suite, runs against the real migrations
+  scripts/           reference CLI client for the phonebook protocol
+workers/relay/       Cloudflare Worker + Durable Object fallback transport
+  src/               session pairing and byte forwarding
+  test/              vitest suite: auth, pairing, forwarding, teardown
+
 launchers/           easy-start scripts for release packages
 scripts/             setup/build helpers
 docs/                user documentation
-.github/workflows/   cross-platform CI and release builds
+.github/workflows/   cross-platform CI (tests only; never deploys)
 ```
+
+The two Workers are deployed to Cloudflare and serve production, but they are ordinary source in
+this repository: clone it and you have everything needed to run, test and deploy the whole system.
 
 ## What this project is
 

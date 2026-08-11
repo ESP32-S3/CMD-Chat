@@ -1,0 +1,39 @@
+/**
+ * CMD-Chat relay.
+ *
+ * Deliberately a SEPARATE Worker from cmd-chat-phonebook, with no D1 binding of
+ * any kind. That separation is structural, not stylistic: it makes it
+ * impossible for chat bytes to reach the phonebook database, and it means a
+ * relay deploy can never break peer discovery.
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cmd-chat-relay",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-11",
+
+  "observability": {
+    "enabled": true
+  },
+
+  /**
+   * One Durable Object per relay session. The DO is the rendezvous point that
+   * pairs the two WebSockets; it holds no storage and keeps nothing after the
+   * session ends.
+   */
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RELAY_SESSION",
+        "class_name": "RelaySession"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RelaySession"]
+    }
+  ]
+}
