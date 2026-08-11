@@ -81,16 +81,12 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p dist
-          if [ "$GOOS" = "windows" ]; then
-            go build -trimpath -ldflags="-s -w" -o "dist/${{ matrix.binary }}" ./cmd/cmd-chat
-          else
-            go build -trimpath -ldflags="-s -w" -o "dist/${{ matrix.binary }}" ./cmd/cmd-chat
-          fi
+          go build -trimpath -ldflags="-s -w" -o "dist/${{ matrix.binary }}" ./cmd/cmd-chat
           cp README.md dist/
           cp docs/QUICKSTART.md dist/QUICKSTART.md
           cp "${{ matrix.launcher }}" dist/
-          if [ "$GOOS" = "linux" ]; then
-            chmod +x "dist/Start-CMD-Chat.sh" "dist/${{ matrix.binary }}"
+          if [ "$GOOS" = "linux" ] || [ "$GOOS" = "darwin" ]; then
+            chmod +x "dist/${{ matrix.binary }}" "dist/${{ matrix.launcher##*/ }}"
           fi
           cd dist
           zip -9 -r "../${{ matrix.archive }}" .
