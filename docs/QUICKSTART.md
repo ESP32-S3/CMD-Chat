@@ -11,7 +11,7 @@ You **do not need Go or Python**.
 3. Open the extracted folder.
 4. **Windows:** double-click `CMD-Chat.exe`.
 5. **macOS:** double-click `Start CMD-Chat.command`.
-6. **Linux:** run `Start-CMD-Chat.sh` (or double-click `CMD-Chat` if your file manager allows it).
+6. **Linux:** double-click `Start-CMD-Chat.sh` if your file manager allows scripts to run, or run it from your terminal.
 
 CMD-Chat opens its simple interface in your normal web browser.
 
@@ -41,7 +41,7 @@ Once connected, type a message and click **Send**.
 
 ## Leave
 
-Close the CMD-Chat browser window or use **Back** to stop the current chat.
+Use **Back** to stop the current chat, or close the CMD-Chat browser window when you're done.
 
 ### If it won't connect
 
