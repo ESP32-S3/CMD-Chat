@@ -28,7 +28,14 @@ jobs:
         # cmd/cmd-chat and internal/chat predate this check.
         shell: bash
         run: |
-          unformatted="$(gofmt -l internal/phonebook internal/relay internal/connect)"
+          # Check whichever of these exist: a package may not be present on
+          # every branch, and gofmt exits non-zero on a missing path.
+          targets=""
+          for d in internal/phonebook internal/relay internal/connect; do
+            [ -d "$d" ] && targets="$targets $d"
+          done
+          [ -z "$targets" ] && exit 0
+          unformatted="$(gofmt -l $targets)"
           if [ -n "$unformatted" ]; then
             echo "These files need gofmt:"
             echo "$unformatted"
@@ -39,7 +46,10 @@ jobs:
       - name: Test
         run: go test ./...
       - name: Build
-        run: go build ./cmd/cmd-chat
+        # -o is required. Without it the output is named "cmd-chat", which
+        # collides with the CMD-Chat/ launcher directory at the repository root
+        # on case-insensitive filesystems, so the build fails on macOS.
+        run: go build -o dist/cmd-chat ./cmd/cmd-chat
 
   workers:
     name: ${{ matrix.worker }} Worker
