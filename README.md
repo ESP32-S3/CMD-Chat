@@ -44,6 +44,8 @@ CMD-Chat does not mean that **no computer ever acts as a server**. The host's co
 
 It means there is no permanent CMD-Chat backend sitting in the middle of every conversation.
 
+There *is* one small always-on service — the [phonebook](#the-phonebook-finding-peers-across-networks) — but it is a directory, not a conduit. It helps two peers find each other and then plays no part in the conversation. Chat traffic never passes through it, and on a LAN it is not used at all.
+
 There is no central service required for the core chat model to:
 
 - create accounts
@@ -158,9 +160,60 @@ Computer A
 Computer B (temporary host)
 ```
 
-NAT and firewall rules can prevent a direct connection. CMD-Chat includes networking support for detecting/probing some of these situations, but **no client can guarantee a direct connection through every firewall and NAT configuration without some infrastructure to help the peers meet**.
+Across the Internet the two computers first have to *find* each other, because neither knows the other's current address. That is what the phonebook does (see below).
 
-An optional relay can be used as a fallback in deployments that provide one. The relay would forward encrypted traffic; it would not become the chat server or hold your conversations.
+NAT and firewall rules can still prevent a direct connection even once the peers have found each other. CMD-Chat includes networking support for detecting/probing some of these situations, but **no client can guarantee a direct connection through every firewall and NAT configuration**.
+
+**There is currently no relay.** `internal/network/relay.go` defines a `Relay` interface as a future extension point, but nothing implements it, and CMD-Chat ships no relay server. If NAT traversal fails, the connection fails.
+
+## The phonebook (finding peers across networks)
+
+On a LAN, CMD-Chat finds a host by UDP broadcast. That does not work across the Internet, so there is a small public **phonebook**: a Cloudflare Worker backed by a Cloudflare D1 database.
+
+```text
+CMD-Chat client
+     |
+     v
+Cloudflare Worker HTTPS API
+     |
+     v
+D1 phonebook            <-- addresses only, never messages
+     |
+     v
+connection / discovery information
+     |
+     v
+NAT traversal between CMD-Chat clients
+     |
+     v
+direct encrypted peer-to-peer chat
+```
+
+**The phonebook is a directory, not a chat server.** It answers one question — *"where might I reach `cc-XXXX` right now?"* — and then gets out of the way. Your messages never touch it.
+
+What it does and does not hold:
+
+| Stored                                              | Never stored                          |
+| --------------------------------------------------- | ------------------------------------- |
+| Your CMD-Chat ID and public key                      | Chat messages of any kind             |
+| This session's TLS certificate fingerprint           | Private keys, seeds, passwords, tokens |
+| A short-lived list of address candidates             | Raw IP addresses as your identity      |
+| Timestamps used for expiry                           | Display names, email, any profile data |
+
+Key properties:
+
+- **Your ID is stable; your listing is not.** The ID is derived from your public key and never changes. The listing is a temporary registration that expires **five minutes** after your last heartbeat, and the addresses in it are destroyed when it lapses or when you stop hosting.
+- **Only you can change your own entry.** Every write is signed with your Ed25519 identity key, and your ID is a hash of the matching public key, so nobody can register, refresh, or delete a listing they don't hold the key for. The private key never leaves your device.
+- **Direct peer-to-peer is still the transport.** The phonebook only supplies the address to dial and the TLS fingerprint to pin. The chat connection itself is the same direct, pinned, mutually-authenticated TLS 1.3 session used on a LAN.
+- **Discovery is not reachability.** Finding a peer in the phonebook does not mean you can connect to them. On restrictive networks — symmetric NAT, CGNAT, strict corporate firewalls — the direct connection will still fail, and there is no relay to fall back to.
+
+Hosting publishes your listing automatically. To stay LAN-only:
+
+```text
+cmd-chat host --publish=false
+```
+
+The directory URL is configurable in one place (`internal/phonebook`), and can be overridden with the `CMD_CHAT_PHONEBOOK_URL` environment variable if you self-host the Worker.
 
 ## Security
 
@@ -174,7 +227,9 @@ CMD-Chat uses:
 - **Local peer-key pinning** so an already-trusted ID cannot silently switch to a different key.
 - Optional **TLS certificate fingerprint pinning** for an additional verification layer.
 
-The private identity key remains on the device.
+- **Signed phonebook writes** so a listing can only be created, refreshed or removed by the holder of the matching private key.
+
+The private identity key remains on the device, including when publishing to the phonebook — only the public key and a signature are ever sent.
 
 This project is a security-oriented prototype and has not undergone a formal security audit.
 
@@ -219,10 +274,16 @@ Host a temporary chat:
 cmd-chat host
 ```
 
-Join a host discovered on your LAN:
+Host without publishing to the public phonebook (LAN only):
 
 ```text
-cmd-chat join cc-XXXXXXXXXXXXXXX
+cmd-chat host --publish=false
+```
+
+Join a host. CMD-Chat searches your LAN first, then falls back to the phonebook:
+
+```text
+cmd-chat join cc-XXXXXXXXXXXXXXXX
 ```
 
 Join a directly reachable host by address:
@@ -246,6 +307,7 @@ internal/chat/       chat connections and message protocol
 internal/auth/       peer authentication and trust
 internal/identity/   persistent device identity
 internal/discovery/  LAN host discovery
+internal/phonebook/  public rendezvous directory client (Cloudflare Worker + D1)
 internal/network/    connectivity and NAT-related networking
 internal/ipc/        local ChromeOS-to-Go bridge
 launchers/           easy-start scripts for release packages
