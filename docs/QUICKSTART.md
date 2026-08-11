@@ -2,11 +2,57 @@
 
 **For people who don't want to deal with technical crap.**
 
-## 1. Install it
+## If you downloaded a release
 
-Download CMD-Chat and make sure **Go 1.23+** is installed.
+You **do not need Go or Python**.
 
-From the CMD-Chat folder, run:
+1. Download the CMD-Chat package for your computer.
+2. Extract the ZIP.
+3. Open the extracted folder.
+4. **Windows:** double-click `CMD-Chat.exe`.
+5. **macOS:** double-click `Start CMD-Chat.command`.
+6. **Linux:** run `Start-CMD-Chat.sh` (or double-click `CMD-Chat` if your file manager allows it).
+
+CMD-Chat opens its simple interface in your normal web browser.
+
+## Start a chat
+
+Click **Start a Chat**.
+
+You'll get a code like:
+
+```text
+cc-K7F4A92D3B1E
+```
+
+Click **Copy code** and send it to your friend.
+
+Leave CMD-Chat open while you wait.
+
+## Join a chat
+
+Click **Join a Chat**.
+
+Paste your friend's code and click **Join**.
+
+If both computers are on the same Wi-Fi/LAN, CMD-Chat can automatically find the host.
+
+Once connected, type a message and click **Send**.
+
+## Leave
+
+Close the CMD-Chat browser window or use **Back** to stop the current chat.
+
+### If it won't connect
+
+- Make sure the other person has CMD-Chat open.
+- Double-check the ID you pasted.
+- Same-Wi-Fi connections are usually the easiest.
+- Different networks can be blocked by a firewall or router.
+
+## If you downloaded the source code
+
+Source-code users are the exception. Install **Go 1.23+**, then run the installer from the repository folder:
 
 **Windows:**
 ```bat
@@ -18,49 +64,4 @@ python scripts/install.py
 python3 scripts/install.py
 ```
 
-The installer builds CMD-Chat for you.
-
-## 2. Start a chat
-
-One person runs:
-
-```text
-cmd-chat host
-```
-
-You'll get a code like:
-
-```text
-cc-K7F4A92D3B1E
-```
-
-**Send that code to your friend.**
-
-## 3. Join
-
-Your friend runs:
-
-```text
-cmd-chat join cc-K7F4A92D3B1E
-```
-
-Replace the example code with the one you received.
-
-Once it says you're connected, type your message and press **Enter**.
-
-## 4. Leave
-
-Type:
-
-```text
-/quit
-```
-
-That's it.
-
-### A couple things to know
-
-- Both people need CMD-Chat running while chatting.
-- The person who uses `host` temporarily hosts the chat from their own computer.
-- Same-Wi-Fi connections are usually the easiest.
-- If you're on different networks and it won't connect, a firewall or router may be blocking the connection.
+The installer builds the ready-to-run CMD-Chat executable in `bin/`.
