@@ -8,6 +8,62 @@ When someone hosts a chat, **their own computer temporarily becomes the chat ser
 
 The networking underneath it exists to make that simple idea work. You do not need to care about TLS, NAT probing, peer authentication, or discovery just to send a message.
 
+## Quick Start (No Tech Stuff)
+
+Just want to chat? Here's the short version.
+
+### 1. Get CMD-Chat
+
+Download the project and make sure **Go 1.23 or newer** is installed. Then run the installer:
+
+```bash
+python3 scripts/install.py
+```
+
+On Windows, if `python3` does not work, try:
+
+```bat
+python scripts/install.py
+```
+
+The installer builds CMD-Chat for your computer and puts it in the `bin` folder.
+
+### 2. Start a chat
+
+One person runs:
+
+```text
+cmd-chat host
+```
+
+You'll get an ID that looks like:
+
+```text
+cc-K7F4A92D3B1E
+```
+
+**Send that ID to your friend.**
+
+### 3. Join the chat
+
+Your friend runs:
+
+```text
+cmd-chat join cc-K7F4A92D3B1E
+```
+
+That's it. Once connected, type a message and press Enter.
+
+To leave, type:
+
+```text
+/quit
+```
+
+**Important:** Both people need CMD-Chat running while they chat. The host's computer is the temporary chat server, so closing it ends that chat.
+
+> **Having trouble connecting?** Same-Wi-Fi connections are the easiest. Connections between different networks can depend on firewalls and NAT settings.
+
 ## The idea
 
 ```text
