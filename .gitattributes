@@ -1,0 +1,21 @@
+# Normalise text files to LF in the repository *and* in working trees on every
+# platform.
+#
+# Without this, Git for Windows' default core.autocrlf=true checks Go sources
+# out with CRLF, and `gofmt -l` reports every one of them as unformatted -- so
+# the gofmt step in CI passes on Linux and macOS and fails on windows-latest,
+# for a reason that has nothing to do with the code.
+* text=auto eol=lf
+
+# Batch files are parsed by cmd.exe, which wants CRLF.
+*.bat text eol=crlf
+
+# Never touch these.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.zip binary
