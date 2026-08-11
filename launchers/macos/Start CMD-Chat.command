@@ -1,11 +1,9 @@
 #!/bin/bash
 cd "$(dirname "$0")"
 if [ -x "CMD-Chat" ]; then
-  ./CMD-Chat
-elif [ -x "../../bin/cmd-chat" ]; then
-  "../../bin/cmd-chat"
+  exec ./CMD-Chat
 else
   echo "CMD-Chat was not found."
-  echo "If you downloaded the source code, build it first with scripts/install.py."
+  echo "Make sure you extracted the complete CMD-Chat release ZIP."
   read -r -p "Press Enter to close..."
 fi
