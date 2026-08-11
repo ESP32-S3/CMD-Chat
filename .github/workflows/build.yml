@@ -65,6 +65,13 @@ jobs:
             binary: CMD-Chat
             archive: CMD-Chat-Linux-arm64.zip
             launcher: CMD-Chat/Linux/Start-CMD-Chat.sh
+          - name: ChromeOS
+            goos: linux
+            goarch: amd64
+            binary: CMD-Chat
+            archive: CMD-Chat-ChromeOS-x64.zip
+            launcher: CMD-Chat/ChromeOS/Start-CMD-Chat.sh
+            chromeos: true
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -85,6 +92,9 @@ jobs:
           cp README.md dist/
           cp docs/QUICKSTART.md dist/QUICKSTART.md
           cp "${{ matrix.launcher }}" dist/
+          if [ "${{ matrix.chromeos }}" = "true" ]; then
+            cp clients/chromeos/cmd_chat.py dist/
+          fi
           if [ "$GOOS" = "linux" ] || [ "$GOOS" = "darwin" ]; then
             chmod +x "dist/${{ matrix.binary }}" "dist/${{ matrix.launcher##*/ }}"
           fi
