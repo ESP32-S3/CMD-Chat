@@ -2,11 +2,15 @@
 
 **A serverless chat tool for talking directly to another computer.**
 
+> **Normal user? Don't download the source code. Download the latest release, extract it, and double-click `CMD-Chat.exe` (Windows) or the included launcher for your platform.**
+>
+> **Start here: [`docs/QUICKSTART.md`](docs/QUICKSTART.md)**
+
 CMD-Chat is built around a simple idea: **you should be able to open a chat with another person without signing up for an account, running a permanent chat server, or handing your messages to a central service.**
 
 When someone hosts a chat, **their own computer temporarily becomes the chat server**. When the chat closes, that host server is gone.
 
-The networking underneath it exists to make that simple idea work. You do not need to care about TLS, NAT probing, peer authentication, or discovery just to send a message.
+The normal application now opens a simple graphical interface automatically. The terminal commands remain available for developers and advanced users.
 
 ## The idea
 
@@ -59,104 +63,29 @@ CMD-Chat
 
 You <---------------> Friend
           P2P
-
-or, when you are the host:
-
-Friend -----------> Your computer
-                    temporary host
 ```
 
 ## What using it feels like
 
 ### Host
 
-Open CMD-Chat and host a chat:
+Open CMD-Chat and click **Start a Chat**. The app gives you your persistent ID and a button to copy it.
 
-```text
-$ cmd-chat host
-
-Your ID: cc-K7F4A92D3B1E
-
-Hosting chat...
-Waiting for someone to connect.
-```
-
-Give the other person your persistent ID.
+Send that ID to your friend and leave CMD-Chat open.
 
 ### Join
 
-They open CMD-Chat and enter your ID:
+Open CMD-Chat and click **Join a Chat**. Paste your friend's ID and click **Join**.
 
-```text
-$ cmd-chat join cc-K7F4A92D3B1E
+If both computers are on the same LAN, CMD-Chat can discover the host automatically.
 
-Searching for host...
-Connected.
-
-> yo
-```
-
-You see:
-
-```text
-[friend] yo
-> 
-```
-
-The exact connection path can vary depending on the network. On the same Wi-Fi it can be a direct LAN connection. Across the Internet it may require a directly reachable host, NAT traversal, or an optional relay.
+The exact connection path can vary depending on the network. Across different networks, firewall and NAT rules can prevent a direct connection.
 
 ## Your ID stays the same
 
 Your CMD-Chat ID is **not your IP address**.
 
 Every installation has a persistent Ed25519 identity. Its public key determines the ID, so changing Wi-Fi networks, moving locations, or getting a new IP address does not change who you are.
-
-```text
-Your computer
-     |
-     +-- persistent identity
-     |      cc-K7F4A92D3B1E
-     |
-     +-- current network
-            192.168.1.42
-            or
-            142.xxx.xxx.xxx
-
-The network address can change.
-The identity does not.
-```
-
-## Same network vs. different networks
-
-### Same Wi-Fi
-
-This is the easiest case.
-
-```text
-Computer A
-    |
-    | local network
-    |
-Computer B
-```
-
-CMD-Chat can use LAN discovery to find the host's current local address. The chat itself then uses the direct connection.
-
-### Different Wi-Fi networks
-
-CMD-Chat tries to establish a direct connection when the networks allow it:
-
-```text
-Computer A
-     |
-     | Internet
-     |
-Computer B (temporary host)
-```
-
-NAT and firewall rules can prevent a direct connection. CMD-Chat includes networking support for detecting/probing some of these situations, but **no client can guarantee a direct connection through every firewall and NAT configuration without some infrastructure to help the peers meet**.
-
-An optional relay can be used as a fallback in deployments that provide one. The relay would forward encrypted traffic; it would not become the chat server or hold your conversations.
 
 ## Security
 
@@ -174,19 +103,21 @@ The private identity key remains on the device.
 
 This project is a security-oriented prototype and has not undergone a formal security audit.
 
-## Cross-platform
+## Downloading and launching
 
-The core is written in Go and is intended to run on:
+For regular users, use a release package rather than the source repository.
 
-- Windows (CMD / PowerShell)
-- Linux terminals
-- macOS Terminal
-- Linux environments on supported ChromeOS devices
-- amd64 and arm64 systems
+Each release contains ready-to-run builds for:
 
-A lightweight Python/Tkinter ChromeOS frontend is also included for the ChromeOS client architecture.
+- Windows x64
+- macOS Intel
+- macOS Apple Silicon
+- Linux x64
+- Linux ARM64
 
-## Build
+Extract the package and launch CMD-Chat. No Go or Python installation is required for release builds.
+
+## Developer build
 
 Install Go 1.23+:
 
@@ -201,51 +132,33 @@ Or use the bootstrap script:
 python3 scripts/install.py
 ```
 
-## Basic usage
+The compiled program opens the graphical interface when launched without arguments.
 
-Get your permanent ID:
+## Terminal usage
+
+The GUI is the default, but the original command-line interface is still available:
 
 ```text
 cmd-chat id
-```
-
-Host a temporary chat:
-
-```text
 cmd-chat host
-```
-
-Join a host discovered on your LAN:
-
-```text
 cmd-chat join cc-XXXXXXXXXXXXXXX
-```
-
-Join a directly reachable host by address:
-
-```text
 cmd-chat join --address HOST:38556 --fingerprint SHA256_CERT_FINGERPRINT
-```
-
-Leave a chat with:
-
-```text
-/quit
+cmd-chat gui
 ```
 
 ## Project structure
 
 ```text
-cmd/cmd-chat/        the chat tool users actually run
-clients/chromeos/    ChromeOS terminal-style frontend
-internal/chat/       chat connections and message protocol
-internal/auth/       peer authentication and trust
-internal/identity/   persistent device identity
-internal/discovery/  LAN host discovery
-internal/network/    connectivity and NAT-related networking
-internal/ipc/        local ChromeOS-to-Go bridge
-scripts/             setup/build helpers
-.github/workflows/   cross-platform CI
+cmd/cmd-chat/        main application + click-to-launch GUI
+cmd/cmd-chat/ui/     embedded browser interface
+clients/             additional client/front-end code
+internal/             chat, identity, discovery, network, auth, IPC
+scripts/              developer setup/build helpers
+launchers/            double-click launchers for source/build folders
+docs/                 user documentation
+.github/workflows/    automated tests and release builds
+go.mod               Go module definition
+README.md             project overview
 ```
 
 ## What this project is
@@ -256,4 +169,4 @@ It is a small tool for one specific idea:
 
 > **If two computers want to chat, let one of those computers host the conversation.**
 
-The rest of the project exists to make that idea reliable, portable, and secure.
+The rest of the project exists to make that idea reliable, portable, secure, and easy to launch.
