@@ -1,95 +1,39 @@
 package main
 
 import (
-	"bufio"
-	"flag"
-	"fmt"
-	"os"
-	"strings"
-	"time"
-
-	"github.com/ESP32-S3/CMD-Chat/internal/chat"
-	"github.com/ESP32-S3/CMD-Chat/internal/debug"
-	"github.com/ESP32-S3/CMD-Chat/internal/discovery"
-	"github.com/ESP32-S3/CMD-Chat/internal/identity"
-	"github.com/ESP32-S3/CMD-Chat/internal/ipc"
-	"github.com/ESP32-S3/CMD-Chat/internal/network"
+ "bufio"
+ "flag"
+ "fmt"
+ "os"
+ "os/exec"
+ "runtime"
+ "strings"
+ "time"
+ "github.com/ESP32-S3/CMD-Chat/internal/chat"
+ "github.com/ESP32-S3/CMD-Chat/internal/debug"
+ "github.com/ESP32-S3/CMD-Chat/internal/discovery"
+ "github.com/ESP32-S3/CMD-Chat/internal/identity"
+ "github.com/ESP32-S3/CMD-Chat/internal/ipc"
+ "github.com/ESP32-S3/CMD-Chat/internal/network"
 )
-
-const tcpPort = 38556
-const ipcAddress = "127.0.0.1:5050"
-
-func name() string { if v := os.Getenv("USERNAME"); v != "" { return v }; if v := os.Getenv("USER"); v != "" { return v }; return "user" }
-
-func main() {
-	defer debug.Recover()
-	id, err := identity.LoadOrCreate(); if err != nil { fatal(err) }
-	debug.Log("CMD-Chat started; args=%q", os.Args[1:])
-	if len(os.Args) > 1 { switch os.Args[1] { case "id": fmt.Println(id.ID); return; case "endpoint": endpoint(); return; case "host": host(id); return; case "join": join(id, os.Args[2:]); return; case "help", "--help", "-h": usage(); return } }
-	interactive(id)
+const tcpPort=38556
+const ipcAddress="127.0.0.1:5050"
+func name() string { if v:=os.Getenv("USERNAME");v!=""{return v};if v:=os.Getenv("USER");v!=""{return v};return "user" }
+func main(){
+ if len(os.Args)>1 && os.Args[1]=="--debug-child" { debugChild(); return }
+ defer debug.Recover(); id,err:=identity.LoadOrCreate();if err!=nil{fatal(err)};debug.Log("CMD-Chat started; args=%q",os.Args[1:])
+ if len(os.Args)>1 {switch os.Args[1]{case "id":fmt.Println(id.ID);return;case "endpoint":endpoint();return;case "host":host(id);return;case "join":join(id,os.Args[2:]);return;case "help","--help","-h":usage();return}}
+ interactive(id)
 }
-
-func interactive(id *identity.Identity) {
-	r := bufio.NewReader(os.Stdin)
-	for {
-		fmt.Println("========================================")
-		fmt.Println("              CMD-Chat")
-		fmt.Println("========================================")
-		fmt.Println("1) Start a chat")
-		fmt.Println("2) Join a chat")
-		fmt.Println("3) Show my ID")
-		fmt.Println("4) Debug / crash logs")
-		fmt.Println("5) Exit")
-		fmt.Println(); fmt.Print("> ")
-		choice, err := r.ReadString('\n'); if err != nil { return }
-		switch strings.TrimSpace(choice) {
-		case "1": host(id); return
-		case "2": fmt.Print("Friend's ID: "); target, err := r.ReadString('\n'); if err != nil { return }; join(id, []string{strings.TrimSpace(target)}); return
-		case "3": fmt.Printf("\nYour ID: %s\n\n", id.ID); fmt.Println("Give this ID to someone who wants to join your chat."); fmt.Println()
-		case "4": debugMenu(r)
-		case "5": return
-		default: fmt.Println("Please choose 1, 2, 3, 4, or 5."); fmt.Println()
-		}
-	}
-}
-
-func debugMenu(r *bufio.Reader) {
-	fmt.Println(); fmt.Println("Debug / crash logs")
-	if debug.Enabled() { fmt.Println("Debug logging: ENABLED"); fmt.Println("Debug events and panic crash reports are being recorded.") } else {
-		fmt.Println("Debug logging: DISABLED"); fmt.Println("Enable this if CMD-Chat crashes or behaves strangely."); fmt.Print("Enable debug and crash logging? (y/n): ")
-		answer, err := r.ReadString('\n'); if err != nil { return }
-		if strings.EqualFold(strings.TrimSpace(answer), "y") || strings.EqualFold(strings.TrimSpace(answer), "yes") { path, err := debug.Enable(); if err != nil { fmt.Printf("Could not enable logging: %v\n", err) } else { fmt.Println("Debug logging enabled."); fmt.Println("Log file:", path) } } else { fmt.Println("Debug logging remains disabled.") }
-	}
-	fmt.Println()
-}
-
-func usage() { fmt.Println("CMD-Chat - lightweight cross-platform terminal P2P chat"); fmt.Println("Usage:"); fmt.Println("  cmd-chat                 # open the terminal menu"); fmt.Println("  cmd-chat id"); fmt.Println("  cmd-chat endpoint"); fmt.Println("  cmd-chat host [--port 38556]"); fmt.Println("  cmd-chat join <persistent-id>        # LAN discovery"); fmt.Println("  cmd-chat join --address host:port --fingerprint SHA256...") }
-
-func endpoint() { e, err := network.DiscoverPublicEndpoint(); if err != nil { fatal(err) }; debug.Log("Endpoint discovery: %s:%d", e.Address, e.Port); fmt.Printf("Public UDP endpoint: %s:%d\n", e.Address, e.Port); fmt.Println("This is a NAT-discovery result; it is not by itself a reachable TCP chat address.") }
-
-func startIPC(id *identity.Identity, h *chat.Host) {
-	srv := ipc.Server{Address: ipcAddress, OnCommand: func(cmd ipc.Command) { debug.Log("IPC command: %s", cmd.Cmd); switch cmd.Cmd { case "status": fmt.Printf("IPC status requested by %s\n", cmd.ID); case "send": if strings.TrimSpace(cmd.Message) != "" { h.Broadcast(chat.Packet{Type: "msg", From: id.ID, Name: name(), Text: cmd.Message}) } } }}
-	go func() { if err := srv.Listen(); err != nil { debug.Log("IPC bridge stopped: %v", err); fmt.Printf("IPC bridge stopped: %v\n", err) } }()
-}
-
-func host(id *identity.Identity) {
-	fs := flag.NewFlagSet("host", flag.ExitOnError); port := fs.Int("port", tcpPort, "TCP listen port"); _ = fs.Parse(os.Args[2:])
-	h, err := chat.NewHost(id.ID, name(), id); if err != nil { fatal(err) }; debug.Log("Hosting chat; id=%s port=%d fingerprint=%s", id.ID, *port, h.Fingerprint); startIPC(id, h)
-	go func() { if err := discovery.Serve(discovery.Announcement{ID: id.ID, Name: name(), Port: *port, Fingerprint: h.Fingerprint}); err != nil { debug.Log("LAN discovery stopped: %v", err); fmt.Printf("LAN discovery stopped: %v\n", err) } }()
-	go func() { if err := h.Listen(*port); err != nil { debug.Log("Chat server stopped: %v", err); fmt.Printf("Chat server stopped: %v\n", err) } }()
-	fmt.Printf("Your ID: %s\nHosting chat for %s\nFingerprint: %s\n", id.ID, id.ID, h.Fingerprint); fmt.Println("IPC bridge: ", ipcAddress); fmt.Println("Type messages below. /quit exits.")
-	input := bufio.NewScanner(os.Stdin); fmt.Print("> "); for input.Scan() { text := strings.TrimSpace(input.Text()); if text == "/quit" { return }; if text == "" { fmt.Print("> "); continue }; debug.Log("Host message sent: %q", text); h.Broadcast(chat.Packet{Type: "msg", From: id.ID, Name: name(), Text: text}); fmt.Printf("\r[%s] %s\n> ", name(), text) }
-}
-
-func join(id *identity.Identity, args []string) {
-	fs := flag.NewFlagSet("join", flag.ExitOnError); address := fs.String("address", "", "host:port"); fingerprint := fs.String("fingerprint", "", "SHA-256 certificate fingerprint"); _ = fs.Parse(args); if *address != "" { connect(id, *address, *fingerprint, ""); return }
-	target := id.ID; if fs.NArg() > 0 { target = fs.Arg(0) }; fmt.Printf("Searching this LAN for %s...\n", target); found, err := discovery.Find(target, 3*time.Second); if err != nil { fatal(err) }; if len(found) == 0 { fmt.Println("No LAN host found."); fmt.Println("For another network, use: cmd-chat join --address HOST:PORT --fingerprint FINGERPRINT"); return }; for i, a := range found { fmt.Printf("[%d] %s (%s)\n", i+1, a.Name, a.Endpoint) }; a := found[0]; connect(id, a.Endpoint, a.Fingerprint, a.ID)
-}
-
-func connect(id *identity.Identity, address, fingerprint, expectedHostID string) {
-	fmt.Printf("Connecting to %s...\n", address); debug.Log("Connecting to %s", address); c, dec, err := chat.Client(address, fingerprint, expectedHostID, id.ID, name(), id); if err != nil { fatal(err) }; defer c.Close()
-	var hello chat.Packet; if err := dec.Decode(&hello); err != nil { fatal(err) }; if hello.Type != "hello" { fatal(fmt.Errorf("invalid host handshake")) }; fmt.Printf("Authenticated host %s (%s).\n", hello.Name, hello.From)
-	go chat.ReadLoop(dec, func(p chat.Packet) { if p.Type == "msg" { debug.Log("Message received from %s", p.From); fmt.Printf("\r[%s] %s\n> ", p.Name, p.Text) } }); input := bufio.NewScanner(os.Stdin); fmt.Print("> "); for input.Scan() { text := strings.TrimSpace(input.Text()); if text == "/quit" { return }; if text == "" { fmt.Print("> "); continue }; if err := chat.Send(c, chat.Packet{Type: "msg", From: id.ID, Name: name(), Text: text}); err != nil { debug.Log("Send failed: %v", err); fmt.Printf("Send failed: %v\n", err); return }; fmt.Print("> ") }
-}
-
-func fatal(err error) { debug.Log("Fatal error: %v", err); fmt.Fprintln(os.Stderr, "error:", err); os.Exit(1) }
+func interactive(id *identity.Identity){r:=bufio.NewReader(os.Stdin);for{fmt.Println("========================================");fmt.Println("              CMD-Chat");fmt.Println("========================================");fmt.Println("1) Start a chat");fmt.Println("2) Join a chat");fmt.Println("3) Show my ID");fmt.Println("4) Debug / crash logs");fmt.Println("5) Exit");fmt.Println();fmt.Print("> ");choice,err:=r.ReadString('\n');if err!=nil{return};switch strings.TrimSpace(choice){case "1":host(id);return;case "2":fmt.Print("Friend's ID: ");target,err:=r.ReadString('\n');if err!=nil{return};join(id,[]string{strings.TrimSpace(target)});return;case "3":fmt.Printf("\nYour ID: %s\n\n",id.ID);fmt.Println("Give this ID to someone who wants to join your chat.");fmt.Println();case "4":debugMenu(r);case "5":return;default:fmt.Println("Please choose 1, 2, 3, 4, or 5.");fmt.Println()}}}
+func debugMenu(r *bufio.Reader){fmt.Println();fmt.Println("Debug / crash logs");if debug.Enabled(){fmt.Println("Debug logging: ENABLED");fmt.Println("Debug events and panic crash reports are being recorded.");fmt.Println();return};fmt.Println("This opens a second terminal running CMD-Chat in debug mode.");fmt.Println("Keep it open while reproducing the problem.");fmt.Print("Open debug terminal? (y/n): ");a,err:=r.ReadString('\n');if err!=nil{return};if !strings.EqualFold(strings.TrimSpace(a),"y")&&!strings.EqualFold(strings.TrimSpace(a),"yes"){fmt.Println("Debug logging remains disabled.");fmt.Println();return};if err:=launchDebugTerminal();err!=nil{fmt.Printf("Could not open debug terminal: %v\n",err);fmt.Println();return};fmt.Println("Debug terminal opened. Reproduce the problem there.");fmt.Println()}
+func launchDebugTerminal() error{exe,err:=os.Executable();if err!=nil{return err};switch runtime.GOOS{case "windows":return exec.Command("cmd.exe","/c","start","CMD-Chat Debug",exe,"--debug-child").Start();case "darwin":script:=fmt.Sprintf("tell application \"Terminal\" to do script \"%s --debug-child\"",escapeAppleScript(exe));return exec.Command("osascript","-e",script).Start();default:for _,t:=range []string{"x-terminal-emulator","gnome-terminal","konsole","xfce4-terminal","xterm"}{if _,e:=exec.LookPath(t);e!=nil{continue};switch t{case "gnome-terminal":return exec.Command(t,"--",exe,"--debug-child").Start();case "konsole":return exec.Command(t,"-e",exe,"--debug-child").Start();case "xfce4-terminal":return exec.Command(t,"--command",exe+" --debug-child").Start();default:return exec.Command(t,"-e",exe,"--debug-child").Start()}};return fmt.Errorf("no supported terminal emulator was found")}}
+func escapeAppleScript(s string)string{return strings.ReplaceAll(strings.ReplaceAll(s,"\\","\\\\"),"\"","\\\"")}
+func debugChild(){path,err:=debug.Enable();if err!=nil{fmt.Printf("Could not enable debug logging: %v\n",err)}else{fmt.Println("CMD-Chat DEBUG MODE");fmt.Println("Crash/debug log:",path);fmt.Println("Keep this terminal open while reproducing the problem.");fmt.Println()};id,err:=identity.LoadOrCreate();if err!=nil{fatal(err)};interactive(id)}
+func usage(){fmt.Println("CMD-Chat - lightweight cross-platform terminal P2P chat");fmt.Println("Usage:");fmt.Println("  cmd-chat                 # open the terminal menu");fmt.Println("  cmd-chat id");fmt.Println("  cmd-chat endpoint");fmt.Println("  cmd-chat host [--port 38556]");fmt.Println("  cmd-chat join <persistent-id>        # LAN discovery");fmt.Println("  cmd-chat join --address host:port --fingerprint SHA256...")}
+func endpoint(){e,err:=network.DiscoverPublicEndpoint();if err!=nil{fatal(err)};debug.Log("Endpoint discovery: %s:%d",e.Address,e.Port);fmt.Printf("Public UDP endpoint: %s:%d\n",e.Address,e.Port);fmt.Println("This is a NAT-discovery result; it is not by itself a reachable TCP chat address.")}
+func startIPC(id *identity.Identity,h *chat.Host){srv:=ipc.Server{Address:ipcAddress,OnCommand:func(cmd ipc.Command){debug.Log("IPC command: %s",cmd.Cmd);switch cmd.Cmd{case "status":fmt.Printf("IPC status requested by %s\n",cmd.ID);case "send":if strings.TrimSpace(cmd.Message)!=""{h.Broadcast(chat.Packet{Type:"msg",From:id.ID,Name:name(),Text:cmd.Message})}}}};go func(){if err:=srv.Listen();err!=nil{debug.Log("IPC bridge stopped: %v",err);fmt.Printf("IPC bridge stopped: %v\n",err)}}()}
+func host(id *identity.Identity){fs:=flag.NewFlagSet("host",flag.ExitOnError);port:=fs.Int("port",tcpPort,"TCP listen port");_=fs.Parse(os.Args[2:]);h,err:=chat.NewHost(id.ID,name(),id);if err!=nil{fatal(err)};debug.Log("Hosting chat; id=%s port=%d fingerprint=%s",id.ID,*port,h.Fingerprint);startIPC(id,h);go func(){if err:=discovery.Serve(discovery.Announcement{ID:id.ID,Name:name(),Port:*port,Fingerprint:h.Fingerprint});err!=nil{debug.Log("LAN discovery stopped: %v",err);fmt.Printf("LAN discovery stopped: %v\n",err)}}();go func(){if err:=h.Listen(*port);err!=nil{debug.Log("Chat server stopped: %v",err);fmt.Printf("Chat server stopped: %v\n",err)}}();fmt.Printf("Your ID: %s\nHosting chat for %s\nFingerprint: %s\n",id.ID,id.ID,h.Fingerprint);fmt.Println("IPC bridge: ",ipcAddress);fmt.Println("Type messages below. /quit exits.");input:=bufio.NewScanner(os.Stdin);fmt.Print("> ");for input.Scan(){text:=strings.TrimSpace(input.Text());if text=="/quit"{return};if text==""{fmt.Print("> ");continue};debug.Log("Host message sent: %q",text);h.Broadcast(chat.Packet{Type:"msg",From:id.ID,Name:name(),Text:text});fmt.Printf("\r[%s] %s\n> ",name(),text)}}
+func join(id *identity.Identity,args []string){fs:=flag.NewFlagSet("join",flag.ExitOnError);address:=fs.String("address","","host:port");fingerprint:=fs.String("fingerprint","","SHA-256 certificate fingerprint");_=fs.Parse(args);if *address!=""{connect(id,*address,*fingerprint,"");return};target:=id.ID;if fs.NArg()>0{target=fs.Arg(0)};fmt.Printf("Searching this LAN for %s...\n",target);found,err:=discovery.Find(target,3*time.Second);if err!=nil{fatal(err)};if len(found)==0{fmt.Println("No LAN host found.");fmt.Println("For another network, use: cmd-chat join --address HOST:PORT --fingerprint FINGERPRINT");return};for i,a:=range found{fmt.Printf("[%d] %s (%s)\n",i+1,a.Name,a.Endpoint)};a:=found[0];connect(id,a.Endpoint,a.Fingerprint,a.ID)}
+func connect(id *identity.Identity,address,fingerprint,expectedHostID string){fmt.Printf("Connecting to %s...\n",address);debug.Log("Connecting to %s",address);c,dec,err:=chat.Client(address,fingerprint,expectedHostID,id.ID,name(),id);if err!=nil{fatal(err)};defer c.Close();var hello chat.Packet;if err:=dec.Decode(&hello);err!=nil{fatal(err)};if hello.Type!="hello"{fatal(fmt.Errorf("invalid host handshake"))};fmt.Printf("Authenticated host %s (%s).\n",hello.Name,hello.From);go chat.ReadLoop(dec,func(p chat.Packet){if p.Type=="msg"{debug.Log("Message received from %s",p.From);fmt.Printf("\r[%s] %s\n> ",p.Name,p.Text)}});input:=bufio.NewScanner(os.Stdin);fmt.Print("> ");for input.Scan(){text:=strings.TrimSpace(input.Text());if text=="/quit"{return};if text==""{fmt.Print("> ");continue};if err:=chat.Send(c,chat.Packet{Type:"msg",From:id.ID,Name:name(),Text:text});err!=nil{debug.Log("Send failed: %v",err);fmt.Printf("Send failed: %v\n",err);return};fmt.Print("> ")}}
+func fatal(err error){debug.Log("Fatal error: %v",err);fmt.Fprintln(os.Stderr,"error:",err);os.Exit(1)}
