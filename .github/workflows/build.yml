@@ -22,7 +22,6 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
-          cache: true
       - name: Download dependencies
         run: go mod download
       - name: Run tests
@@ -80,7 +79,6 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
-          cache: true
       - name: Build terminal application
         shell: bash
         env:
