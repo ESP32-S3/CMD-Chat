@@ -35,6 +35,9 @@ func (s *guiSession) addLog(line string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if found := extractID(line); found != "" {
+		s.id = found
+	}
 	s.logs = append(s.logs, line)
 	if len(s.logs) > 500 {
 		s.logs = s.logs[len(s.logs)-500:]
@@ -56,7 +59,6 @@ func (s *guiSession) stop() {
 	}
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
 	}
 }
 
@@ -138,6 +140,7 @@ func runGUI(id *identity.Identity) {
 		session.stop()
 		session.mu.Lock()
 		session.mode = ""
+		session.id = ""
 		session.logs = nil
 		session.connected = false
 		session.mu.Unlock()
