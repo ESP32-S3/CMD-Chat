@@ -34,40 +34,40 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Windows
+          - name: Windows x64
             goos: windows
             goarch: amd64
-            binary: CMD-Chat.exe
+            binary: Windows-x64-CMD-Chat.exe
             archive: CMD-Chat-Windows-x64.zip
             launcher: CMD-Chat/Windows/Start CMD-Chat.bat
-          - name: macOS Intel
+          - name: macOS Intel x64
             goos: darwin
             goarch: amd64
-            binary: CMD-Chat
+            binary: macOS-x64-CMD-Chat
             archive: CMD-Chat-macOS-Intel.zip
             launcher: CMD-Chat/macOS/Start CMD-Chat.command
-          - name: macOS Apple Silicon
+          - name: macOS Apple Silicon ARM64
             goos: darwin
             goarch: arm64
-            binary: CMD-Chat
+            binary: macOS-arm64-CMD-Chat
             archive: CMD-Chat-macOS-Apple-Silicon.zip
             launcher: CMD-Chat/macOS/Start CMD-Chat.command
           - name: Linux x64
             goos: linux
             goarch: amd64
-            binary: CMD-Chat
+            binary: Linux-x64-CMD-Chat
             archive: CMD-Chat-Linux-x64.zip
             launcher: CMD-Chat/Linux/Start-CMD-Chat.sh
           - name: Linux ARM64
             goos: linux
             goarch: arm64
-            binary: CMD-Chat
+            binary: Linux-arm64-CMD-Chat
             archive: CMD-Chat-Linux-arm64.zip
             launcher: CMD-Chat/Linux/Start-CMD-Chat.sh
-          - name: ChromeOS
+          - name: ChromeOS x64
             goos: linux
             goarch: amd64
-            binary: CMD-Chat
+            binary: ChromeOS-x64-CMD-Chat
             archive: CMD-Chat-ChromeOS-x64.zip
             launcher: CMD-Chat/ChromeOS/Start-CMD-Chat.sh
             chromeos: true
