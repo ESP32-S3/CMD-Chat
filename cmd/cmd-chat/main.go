@@ -50,20 +50,47 @@ func main() {
 		case "help", "--help", "-h":
 			usage()
 			return
-		case "gui":
-			runGUI(id)
-			return
 		}
 	}
 
-	// Double-clicking the executable opens the graphical interface.
-	runGUI(id)
+	// Default: keep the actual chat experience in the terminal.
+	interactive(id)
+}
+
+func interactive(id *identity.Identity) {
+	fmt.Println("========================================")
+	fmt.Println("              CMD-Chat")
+	fmt.Println("========================================")
+	fmt.Println("1) Start a chat")
+	fmt.Println("2) Join a chat")
+	fmt.Println("3) Show my ID")
+	fmt.Println("4) Exit")
+	fmt.Println()
+	fmt.Print("> ")
+
+	r := bufio.NewReader(os.Stdin)
+	choice, _ := r.ReadString('\n')
+	switch strings.TrimSpace(choice) {
+	case "1":
+		host(id)
+	case "2":
+		fmt.Print("Friend's ID: ")
+		target, _ := r.ReadString('\n')
+		join(id, []string{strings.TrimSpace(target)})
+	case "3":
+		fmt.Printf("\nYour ID: %s\n\n", id.ID)
+		fmt.Println("Give this ID to someone who wants to join your chat.")
+	case "4":
+		return
+	default:
+		fmt.Println("Please choose 1, 2, 3, or 4.")
+	}
 }
 
 func usage() {
 	fmt.Println("CMD-Chat - lightweight cross-platform terminal P2P chat")
 	fmt.Println("Usage:")
-	fmt.Println("  cmd-chat                 # open the graphical interface")
+	fmt.Println("  cmd-chat                 # open the terminal menu")
 	fmt.Println("  cmd-chat id")
 	fmt.Println("  cmd-chat endpoint")
 	fmt.Println("  cmd-chat host [--port 38556]")
