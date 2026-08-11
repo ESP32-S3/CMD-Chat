@@ -1,4 +1,29 @@
-cmd-chat
-cmd-chat.exe
+# Go build output.
+# Anchored to the repository root: an unanchored "cmd-chat" also matches the
+# cmd/cmd-chat source directory, which silently made new files there unaddable.
+/cmd-chat
+/cmd-chat.exe
+/cmd-chat-*.exe
+
 .DS_Store
 *.log
+
+# Cloudflare Workers (workers/phonebook, workers/relay)
+node_modules/
+.wrangler/
+dist/
+.vitest/
+*.tsbuildinfo
+
+# Local secrets. .dev.vars holds the IP_HASH_SALT used by the phonebook Worker;
+# production values are set with `wrangler secret put` and never live in git.
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.example
+
+# Local CMD-Chat state. identity.json contains a private key.
+identity.json
+trusted_peers.json

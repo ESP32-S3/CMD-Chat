@@ -1,0 +1,42 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cmd-chat-phonebook",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-11",
+
+  "observability": {
+    "enabled": true
+  },
+
+  "upload_source_maps": true,
+
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+
+  /**
+   * D1 database used as the CMD-Chat public phonebook.
+   */
+  "d1_databases": [
+    {
+      "binding": "cmd_chat_phonebook",
+      "database_name": "cmd-chat-phonebook",
+      "database_id": "ef0769d2-3543-444b-b122-fc54143b6d34",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  /**
+   * Expiry sweep for stale registrations and spent rate-limit windows.
+   * Registrations also expire logically via expires_at, so a missed run only
+   * delays cleanup — it never makes a stale peer look online.
+   */
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
+}

@@ -1,0 +1,7 @@
+# Salt used to hash caller IPs before they are written to the rate-limit table.
+# Raw IPs are never stored; this salt makes the stored hashes non-enumerable.
+#
+# Local dev: copy this file to .dev.vars (gitignored) and put any random value here.
+# Production: set it as a Worker secret, never in wrangler.jsonc:
+#   npx wrangler secret put IP_HASH_SALT
+IP_HASH_SALT="replace-with-a-long-random-value"
