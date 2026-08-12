@@ -110,6 +110,12 @@ type Announcement struct {
 	// what makes a phonebook-resolved connection as safe as a LAN one.
 	Fingerprint string
 	Candidates  []Candidate
+
+	// ProtocolVersion advertises what this host supports. Version 2 means the
+	// host is also waiting on the relay, so a peer with no direct path can
+	// still reach it. Zero defaults to 1. Reusing this existing field is why
+	// relay support needed no phonebook schema change.
+	ProtocolVersion int
 }
 
 // Peer is a resolved directory entry.
@@ -265,8 +271,12 @@ func (c *Client) Register(ctx context.Context, a Announcement) (*Registration, e
 	if len(a.Candidates) == 0 {
 		return nil, errors.New("phonebook: refusing to register with no connection candidates")
 	}
+	version := a.ProtocolVersion
+	if version <= 0 {
+		version = 1
+	}
 	payload := map[string]any{
-		"protocol_version": 1,
+		"protocol_version": version,
 		"client_version":   c.ClientVersion,
 		"candidates":       a.Candidates,
 	}
