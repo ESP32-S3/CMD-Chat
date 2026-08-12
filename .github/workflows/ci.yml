@@ -4,11 +4,18 @@ on:
   push:
   pull_request:
 
+# CI verifies the code. It never deploys: the Workers are released
+# deliberately with `wrangler deploy`, and no Cloudflare credentials are
+# available to this workflow.
+permissions:
+  contents: read
+
 jobs:
-  test:
-    name: Test on ${{ matrix.os }}
+  go:
+    name: Go on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
@@ -16,7 +23,48 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23'
+      - name: gofmt
+        # Only the packages that are kept gofmt-clean; the older files in
+        # cmd/cmd-chat and internal/chat predate this check.
+        shell: bash
+        run: |
+          # Check whichever of these exist: a package may not be present on
+          # every branch, and gofmt exits non-zero on a missing path.
+          targets=""
+          for d in internal/phonebook internal/relay internal/connect; do
+            [ -d "$d" ] && targets="$targets $d"
+          done
+          [ -z "$targets" ] && exit 0
+          unformatted="$(gofmt -l $targets)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
       - name: Test
         run: go test ./...
       - name: Build
-        run: go build ./cmd/cmd-chat
+        # -o is required. Without it the output is named "cmd-chat", which
+        # collides with the CMD-Chat/ launcher directory at the repository root
+        # on case-insensitive filesystems, so the build fails on macOS.
+        run: go build -o dist/cmd-chat ./cmd/cmd-chat
+
+  phonebook:
+    name: Phonebook Worker
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/phonebook
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install
+        run: npm ci
+      - name: Test
+        # Runs against the real migrations in workers/phonebook/migrations,
+        # using a local D1 instance. Production is never touched.
+        run: npm test -- --run
