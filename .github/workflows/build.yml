@@ -117,8 +117,68 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+      - name: Write release notes
+        run: |
+          cat > notes.md <<'NOTES'
+          ## Talk to anyone, on any network
+
+          CMD-Chat is a peer-to-peer terminal chat. Your messages go **straight from your
+          computer to your friend's** — there is no company server in the middle holding
+          your conversation.
+
+          Until now that only worked reliably when you were both on the same Wi-Fi. This
+          release makes it work **across the internet**, with no setup on your part.
+
+          ### What's new
+
+          - **Chat with people outside your Wi-Fi.** Give someone your ID and they can
+            reach you from anywhere.
+          - **No router or port-forwarding setup.** Nothing to configure, no public IP to
+            look up, no VPN.
+          - **It picks the best connection automatically** — your local network first, then
+            a direct internet connection, and only if neither works, an encrypted relay.
+            You'll see which one it used.
+          - **Works on strict networks**, including mobile hotspots and CGNAT, where a
+            direct connection is impossible.
+
+          ### How it stays private
+
+          Two small Cloudflare services make this possible, and neither can read your chat:
+
+          - A **phonebook** (Cloudflare Worker + D1 database) that answers one question:
+            *where can I reach this ID right now?* It stores your ID, your public key and a
+            short-lived address that expires five minutes after you stop hosting. **It never
+            stores or forwards a single chat message.**
+          - A **relay**, used only when a direct connection is impossible. It forwards
+            already-encrypted traffic between two peers and **holds none of the keys needed
+            to read it**. It stores nothing.
+
+          Your messages stay end-to-end encrypted (TLS 1.3) with Ed25519 identities on both
+          ends, on every path — local, direct or relayed. Your private key never leaves
+          your device.
+
+          ### Getting started
+
+          1. Download the file for your system below.
+          2. Extract the zip.
+          3. Double-click the launcher inside (`Start CMD-Chat.bat` on Windows).
+          4. Pick **Start a chat**, share the ID it shows, and your friend picks **Join a chat**.
+
+          See `QUICKSTART.md` inside the download for more.
+
+          ### Known limitation
+
+          A direct connection can still fail on very restrictive networks; when it does,
+          CMD-Chat falls back to the relay automatically.
+          NOTES
       - name: Publish GitHub release
+        # The single place a release is created. A second workflow used to publish
+        # here too and won the race, so every tag produced bare binaries instead of
+        # these launcher zips, and this job always failed with "release already exists".
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" release-assets/*.zip --repo "${GITHUB_REPOSITORY}" --generate-notes --title "CMD-Chat ${GITHUB_REF_NAME}"
+          gh release create "${GITHUB_REF_NAME}" release-assets/*.zip \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "CMD-Chat ${GITHUB_REF_NAME}" \
+            --notes-file notes.md
