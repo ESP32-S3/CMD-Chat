@@ -86,7 +86,16 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p dist
-          go build -trimpath -ldflags="-s -w" -o "dist/${{ matrix.binary }}" ./cmd/cmd-chat
+          # Stamp the version the update check compares against. A tag build is
+          # the tag; anything else is marked as a development build, which the
+          # check refuses to compare so nobody is told a branch build is stale.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "Building version ${VERSION}"
+          go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o "dist/${{ matrix.binary }}" ./cmd/cmd-chat
           cp README.md dist/
           cp docs/QUICKSTART.md dist/QUICKSTART.md
           cp "${{ matrix.launcher }}" dist/
@@ -120,17 +129,37 @@ jobs:
       - name: Write release notes
         run: |
           cat > notes.md <<'NOTES'
-          ## Just open it. Whoever types first connects.
+          ## CMD-Chat now tells you when there's a new version
 
           CMD-Chat is a peer-to-peer terminal chat. Your messages go **straight from your
           computer to your friend's** — there is no company server in the middle holding
           your conversation.
 
-          This release fixes the crash that closed the window when you tried to start a
-          chat, and removes the start/join step that made it necessary to agree on who
-          goes first.
+          ### New in this release
 
-          ### Fixed
+          - **Update notices on launch.** CMD-Chat asks GitHub whether a newer release
+            exists and tells you once if one does:
+
+            ```
+            A newer CMD-Chat is available: v2.1.6 (you have v2.1.5).
+            Download it from https://github.com/ESP32-S3/CMD-Chat/releases/tag/v2.1.6
+            You can keep chatting on this version; updating is optional.
+            ```
+
+            It **never installs anything** — no self-update, no elevation, no writing over
+            the running program. It prints a link and gets out of the way.
+
+            It **sends nothing about you**: one anonymous request asking what the newest
+            version is. No ID, no identity, no telemetry.
+
+            It **never delays launch**. The check runs in the background and the notice
+            appears when it arrives. If GitHub is unreachable, CMD-Chat says nothing.
+
+            Turn it off with `CMD_CHAT_NO_UPDATE_CHECK=1`.
+
+          - **`cmd-chat version`**, and the version now shows in the header.
+
+          ### Carried over from v2.1.4
 
           - **"Start a chat" no longer closes the terminal.** Picking it from the menu
             crashed the program before it opened a single socket, and the launcher window
@@ -148,8 +177,6 @@ jobs:
           - Leaving a chat with `/quit` returns you to the prompt instead of closing
             CMD-Chat, and a chat that the other side closes no longer leaves you typing
             into a dead connection.
-
-          ### What's new
 
           - **No more "one person starts, the other joins."** Every open copy of CMD-Chat
             is already reachable. Both of you just open it, swap IDs, and **whoever pastes

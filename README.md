@@ -136,6 +136,34 @@ The exact connection path varies with the network. On the same Wi-Fi it is a dir
 [network] direct connection succeeded (IPv6)
 ```
 
+## Update notices
+
+On launch, CMD-Chat asks the GitHub releases API whether a newer version has
+been published, and prints a single notice if one has:
+
+```text
+A newer CMD-Chat is available: v2.1.6 (you have v2.1.5).
+Download it from https://github.com/ESP32-S3/CMD-Chat/releases/tag/v2.1.6
+You can keep chatting on this version; updating is optional.
+```
+
+The properties that matter:
+
+- **It never installs anything.** There is no self-update path, no elevation, no
+  writing over the running binary. It prints a link.
+- **It sends nothing about you.** One unauthenticated GET for the latest release;
+  no identity, no ID, no telemetry, no version history.
+- **It never blocks launch.** The check runs in the background with a six-second
+  bound and is delivered to the prompt when it arrives. An unreachable GitHub
+  costs nothing and prints nothing.
+- **It never fires on a build it cannot reason about.** The version is stamped in
+  at release time; a local `go build` reports `dev` and is left alone.
+- **It is switchable.** `CMD_CHAT_NO_UPDATE_CHECK=1` skips the request entirely.
+
+```text
+cmd-chat version
+```
+
 ## Your ID stays the same
 
 Your CMD-Chat ID is **not your IP address**.
@@ -487,6 +515,8 @@ internal/phonebook/  client for the rendezvous directory
 internal/relay/      client for the fallback transport
 internal/network/    connectivity and NAT-related networking
 internal/ipc/        local ChromeOS-to-Go bridge
+internal/update/     launch-time check for a newer published release
+internal/debug/      opt-in debug logging and crash reports
 
 workers/phonebook/   Cloudflare Worker + D1 rendezvous directory
   src/               request handling, validation, signature verification

@@ -27,10 +27,16 @@ import (
 	"github.com/ESP32-S3/CMD-Chat/internal/network"
 	"github.com/ESP32-S3/CMD-Chat/internal/phonebook"
 	"github.com/ESP32-S3/CMD-Chat/internal/relay"
+	"github.com/ESP32-S3/CMD-Chat/internal/update"
 )
 
 const tcpPort = 38556
 const ipcAddress = "127.0.0.1:5050"
+
+// version is stamped in at build time with
+// -ldflags "-X main.version=v2.1.5". A build without it is a developer build,
+// and the update check stays quiet rather than claiming it is out of date.
+var version = "dev"
 
 func name() string {
 	if v := os.Getenv("USERNAME"); v != "" {
@@ -57,6 +63,9 @@ func main() {
 		switch os.Args[1] {
 		case "id":
 			fmt.Println(id.ID)
+			return
+		case "version", "--version", "-v":
+			fmt.Println(version)
 			return
 		case "endpoint":
 			endpoint()
@@ -141,6 +150,53 @@ func stdinLines() <-chan string {
 		}
 	}()
 	return ch
+}
+
+// checkForUpdate looks for a newer release in the background.
+//
+// It runs off the launch path entirely: the returned channel yields at most one
+// release and is then closed, so a slow or unreachable GitHub delays nothing and
+// a failure says nothing. The result is delivered to the prompt when it arrives
+// rather than being waited for, because an update notice is never worth making
+// someone wait to start a conversation.
+func checkForUpdate() <-chan *update.Release {
+	out := make(chan *update.Release, 1)
+	go func() {
+		defer debug.Contain("update check")
+		defer close(out)
+		if update.Disabled() {
+			debug.Log("Update check disabled by %s", update.DisableEnv)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), update.Timeout)
+		defer cancel()
+		release, err := update.Check(ctx, version)
+		if err != nil {
+			debug.Log("Update check failed: %v", err)
+			return
+		}
+		if release == nil {
+			debug.Log("Update check: %s is current", version)
+			return
+		}
+		debug.Log("Update available: %s -> %s", version, release.Version)
+		out <- release
+	}()
+	return out
+}
+
+// announceUpdate prints the one notice an out-of-date build gets.
+func announceUpdate(release *update.Release) {
+	if release == nil {
+		return
+	}
+	fmt.Println()
+	fmt.Printf("A newer CMD-Chat is available: %s (you have %s).\n", release.Version, version)
+	if release.URL != "" {
+		fmt.Printf("Download it from %s\n", release.URL)
+	}
+	fmt.Println("You can keep chatting on this version; updating is optional.")
+	fmt.Println()
 }
 
 // showPending prints messages that are already queued without waiting for more.
@@ -304,6 +360,7 @@ func isAddrInUse(err error) bool {
 // yours first and you are already there to answer.
 func ready(id *identity.Identity) {
 	lines := stdinLines()
+	updates := checkForUpdate()
 	st, err := openStation(id, tcpPort, true, true)
 	if err != nil {
 		fatal(err)
@@ -324,13 +381,23 @@ func ready(id *identity.Identity) {
 		case p := <-st.peers:
 			fmt.Println()
 			hostChat(st, p, lines)
+		case release, ok := <-updates:
+			// The channel closes once the check is done. Dropping the case
+			// stops the loop spinning on a closed channel; the carriage return
+			// keeps the prompt from being printed twice either way.
+			fmt.Print("\r")
+			if !ok {
+				updates = nil
+				continue
+			}
+			announceUpdate(release)
 		}
 	}
 }
 
 func banner(st *station) {
 	fmt.Println("========================================")
-	fmt.Println("              CMD-Chat")
+	fmt.Printf("              CMD-Chat %s\n", version)
 	fmt.Println("========================================")
 	fmt.Printf("Your ID: %s\n", st.id.ID)
 	fmt.Println()
@@ -548,6 +615,7 @@ func usage() {
 	fmt.Println("Usage:")
 	fmt.Println("  cmd-chat                 # open CMD-Chat; you are reachable immediately")
 	fmt.Println("  cmd-chat id")
+	fmt.Println("  cmd-chat version")
 	fmt.Println("  cmd-chat endpoint")
 	fmt.Println("  cmd-chat host [--port 38556] [--publish=false] [--relay=false]")
 	fmt.Println("  cmd-chat join <persistent-id>        # LAN, then direct, then relay")
@@ -566,6 +634,10 @@ func usage() {
 	fmt.Printf("Phonebook: %s (override with %s)\n", phonebook.BaseURL(), phonebook.BaseURLEnv)
 	fmt.Printf("Relay:     %s (override with %s)\n", relay.BaseURL(), relay.BaseURLEnv)
 	fmt.Println("Set CMD_CHAT_TRANSPORT=lan|direct|relay to pin one path when diagnosing.")
+	fmt.Println()
+	fmt.Printf("This build: %s\n", version)
+	fmt.Printf("On launch CMD-Chat asks GitHub whether a newer release exists and prints a\n")
+	fmt.Printf("notice if one does. It sends nothing about you. Set %s=1 to turn it off.\n", update.DisableEnv)
 }
 
 func endpoint() {
@@ -612,6 +684,7 @@ func host(id *identity.Identity, args []string) {
 	}
 
 	lines := stdinLines()
+	updates := checkForUpdate()
 	st, err := openStation(id, *port, *publish, *relayEnabled)
 	if err != nil {
 		fatal(err)
@@ -642,6 +715,13 @@ func host(id *identity.Identity, args []string) {
 			fmt.Printf("\r%s connected to you.\n", p.ID)
 		case p := <-st.left:
 			fmt.Printf("\r%s left the chat.\n", p.ID)
+		case release, ok := <-updates:
+			fmt.Print("\r")
+			if !ok {
+				updates = nil
+				continue
+			}
+			announceUpdate(release)
 		}
 	}
 }

@@ -70,6 +70,20 @@ Type:
 
 That leaves the chat and takes you back to the prompt — **you stay reachable**, so the same person (or someone else) can connect again. Type `/quit` again to close CMD-Chat.
 
+## Update notices
+
+When CMD-Chat opens, it asks GitHub whether a newer release exists. If one does, it tells you once:
+
+```text
+A newer CMD-Chat is available: v2.1.6 (you have v2.1.5).
+Download it from https://github.com/ESP32-S3/CMD-Chat/releases/tag/v2.1.6
+You can keep chatting on this version; updating is optional.
+```
+
+It never installs anything, never interrupts a chat, and **sends nothing about you** — it only asks what the newest version is. If GitHub is unreachable, CMD-Chat says nothing and carries on.
+
+To turn it off, set the environment variable `CMD_CHAT_NO_UPDATE_CHECK=1`.
+
 ## Other things you can type
 
 ```text
