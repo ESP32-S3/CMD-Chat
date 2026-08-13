@@ -79,40 +79,51 @@ Friend -----------> Your computer
 
 ## What using it feels like
 
-### Host
-
-Open CMD-Chat and host a chat:
+Both people just open CMD-Chat. There is no host role to agree on: an open
+instance is already reachable, so it is only ever a question of who types first.
 
 ```text
-$ cmd-chat host
+$ cmd-chat
 
+========================================
+              CMD-Chat
+========================================
 Your ID: cc-K7F4A92D3B1E
 
-Hosting chat...
-Waiting for someone to connect.
+You are reachable now. Nobody has to "start" or "join" anything.
+Send your ID to a friend, or paste theirs below - whoever types the
+other's ID first connects, and the other side just waits here.
+
+> 
 ```
 
-Give the other person your persistent ID.
-
-### Join
-
-They open CMD-Chat and enter your ID:
+Paste your friend's ID and you become the guest:
 
 ```text
-$ cmd-chat join cc-K7F4A92D3B1E
-
-Searching for host...
-Connected.
+> cc-P3J4TL57W5LFTPFS
+[network] searching the local network
+[network] connected over the local network
+Authenticated host alex (cc-P3J4TL57W5LFTPFS).
+Type messages below. /quit leaves the chat.
 
 > yo
 ```
 
-You see:
+Or do nothing, and let them paste yours. The chat simply opens:
 
 ```text
+cc-P3J4TL57W5LFTPFS connected to you.
+Type messages below. /quit leaves the chat.
+
 [friend] yo
 > 
 ```
+
+`/quit` leaves the chat and returns to the prompt — you stay reachable, so the
+next conversation needs no setup either.
+
+The `host` and `join` subcommands still exist for scripts and for pinning one
+side of a connection deliberately.
 
 The exact connection path varies with the network. On the same Wi-Fi it is a direct LAN connection. Across the Internet it is a direct connection when the network allows one, and a relayed connection when it does not. CMD-Chat picks automatically and tells you which path it used:
 
@@ -330,8 +341,8 @@ On Windows, `go build -o cmd-chat.exe ./cmd/cmd-chat` is enough. There is also
 Run it:
 
 ```bash
-./cmd-chat            # interactive menu
-./cmd-chat host       # host a chat
+./cmd-chat            # reachable immediately; paste an ID to connect out
+./cmd-chat host       # reachable, but never dials out
 ./cmd-chat join cc-XXXXXXXXXXXXXXXX
 ```
 
@@ -406,13 +417,20 @@ CMD_CHAT_TRANSPORT=lan|direct|relay cmd-chat join cc-XXXXXXXXXXXXXXXX
 
 ## Basic usage
 
+Open CMD-Chat. You are reachable straight away, and you can paste a friend's ID
+at the prompt to connect out:
+
+```text
+cmd-chat
+```
+
 Get your permanent ID:
 
 ```text
 cmd-chat id
 ```
 
-Host a temporary chat:
+Be reachable without ever dialling out — useful for a machine left running:
 
 ```text
 cmd-chat host
