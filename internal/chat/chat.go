@@ -26,12 +26,65 @@ import (
 const MaxMessageBytes = 4096
 
 type Packet struct { Type string `json:"type"`; From string `json:"from,omitempty"`; Name string `json:"name,omitempty"`; Text string `json:"text,omitempty"` }
-type Host struct { ID string; Name string; Identity *identity.Identity; Fingerprint string; TLSConfig *tls.Config; Listener net.Listener; Clients map[net.Conn]struct{}; Mu sync.Mutex; WriteMu sync.Mutex }
+
+// Peer identifies the other side of a completed handshake.
+type Peer struct { ID string; Name string }
+
+type Host struct { ID string; Name string; Identity *identity.Identity; Fingerprint string; TLSConfig *tls.Config; Listener net.Listener; Clients map[net.Conn]struct{}; Mu sync.Mutex; WriteMu sync.Mutex
+
+	// OnPeer, when set, is called once a peer has finished the TLS and identity
+	// handshake, and again with Left set when that peer goes away.
+	//
+	// It exists so a caller can wait on "somebody connected to me" at the same
+	// time as it waits on the keyboard: a CMD-Chat instance is always hosting,
+	// so the inbound side has to be able to interrupt the prompt.
+	OnPeer func(p Peer, left bool)
+}
+
+func (h *Host) announce(p Peer, left bool) { if h.OnPeer != nil { h.OnPeer(p, left) } }
 
 func newTLSConfig() (*tls.Config,string,error){key,err:=rsa.GenerateKey(rand.Reader,2048);if err!=nil{return nil,"",err};serial,err:=rand.Int(rand.Reader,new(big.Int).Lsh(big.NewInt(1),120));if err!=nil{return nil,"",err};tmpl:=x509.Certificate{SerialNumber:serial,NotBefore:time.Now().Add(-time.Minute),NotAfter:time.Now().Add(365*24*time.Hour),DNSNames:[]string{"cmd-chat"},KeyUsage:x509.KeyUsageDigitalSignature|x509.KeyUsageKeyEncipherment,ExtKeyUsage:[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}};der,err:=x509.CreateCertificate(rand.Reader,&tmpl,&tmpl,&key.PublicKey,key);if err!=nil{return nil,"",err};cert:=tls.Certificate{Certificate:[][]byte{der},PrivateKey:key};sum:=sha256.Sum256(der);return &tls.Config{Certificates:[]tls.Certificate{cert},MinVersion:tls.VersionTLS13},hex.EncodeToString(sum[:]),nil}
 func NewHost(id,name string,ident *identity.Identity)(*Host,error){cfg,fp,err:=newTLSConfig();if err!=nil{return nil,err};return &Host{ID:id,Name:name,Identity:ident,Fingerprint:fp,TLSConfig:cfg,Clients:make(map[net.Conn]struct{})},nil}
-func (h *Host) Listen(port int)error{ln,err:=tls.Listen("tcp",fmt.Sprintf(":%d",port),h.TLSConfig);if err!=nil{return err};h.Listener=ln;fmt.Printf("Hosting as %s on %s\nTLS fingerprint: %s\n",h.ID,ln.Addr(),h.Fingerprint);for{c,err:=ln.Accept();if err!=nil{return err};go h.handle(c)}}
-func (h *Host) handle(c net.Conn){defer c.Close();dec:=json.NewDecoder(bufio.NewReader(c));var challenge auth.Challenge;if err:=dec.Decode(&challenge);err!=nil||challenge.Type!="auth_challenge"{return};hostResponse,err:=auth.Respond(h.Identity,&challenge);if err!=nil{return};if err=h.writeJSON(c,hostResponse);err!=nil{return};ownChallenge,err:=auth.NewChallenge();if err!=nil{return};if err=h.writeJSON(c,ownChallenge);err!=nil{return};var clientResponse auth.Response;if err=dec.Decode(&clientResponse);err!=nil{return};if err=auth.Verify(ownChallenge,&clientResponse);err!=nil{_=h.writePacket(c,Packet{Type:"error",Text:"authentication failed"});return};store:=auth.Load();if err=store.Trust(clientResponse.ID,clientResponse.PublicKey);err!=nil{_=h.writePacket(c,Packet{Type:"error",Text:"peer identity key changed; refusing connection"});return};h.Mu.Lock();h.Clients[c]=struct{}{};h.Mu.Unlock();defer func(){h.Mu.Lock();delete(h.Clients,c);h.Mu.Unlock()}();if err=h.writePacket(c,Packet{Type:"hello",From:h.ID,Name:h.Name});err!=nil{return};for{var p Packet;if err:=dec.Decode(&p);err!=nil{return};if p.Type!="msg"{continue};if len([]byte(p.Text))>MaxMessageBytes{_=h.writePacket(c,Packet{Type:"error",Text:"message exceeds 4096 bytes"});continue};fmt.Printf("\r[%s] %s\n> ",p.Name,p.Text);h.broadcast(Packet{Type:"msg",From:p.From,Name:p.Name,Text:p.Text},c)}}
+// Bind opens the chat listener without accepting on it yet.
+//
+// Binding is deliberately separate from serving so the caller finds out
+// straight away whether the port could be opened at all. On Windows a firewall
+// prompt that the user cancels fails here, and a caller that learns it
+// synchronously can say so and fall back to the relay, instead of a background
+// goroutine failing where nobody is looking.
+func (h *Host) Bind(port int) error {
+	ln, err := tls.Listen("tcp", fmt.Sprintf(":%d", port), h.TLSConfig)
+	if err != nil { return err }
+	h.Listener = ln
+	return nil
+}
+
+// Serve accepts connections on the listener opened by Bind. It returns once the
+// listener is closed.
+func (h *Host) Serve() error {
+	ln := h.Listener
+	if ln == nil { return errors.New("chat: Serve called before Bind") }
+	for { c, err := ln.Accept(); if err != nil { return err }; go h.handle(c) }
+}
+
+// Disconnect closes every connected client, ending the chat but leaving the
+// listener open so the next peer can still arrive.
+func (h *Host) Disconnect() {
+	h.Mu.Lock()
+	clients := make([]net.Conn, 0, len(h.Clients))
+	for c := range h.Clients { clients = append(clients, c) }
+	h.Mu.Unlock()
+	for _, c := range clients { _ = c.Close() }
+}
+
+// Close stops accepting new connections.
+func (h *Host) Close() error { if h.Listener == nil { return nil }; return h.Listener.Close() }
+
+// Addr reports the address the listener was bound to, or "" when not bound.
+func (h *Host) Addr() string { if h.Listener == nil { return "" }; return h.Listener.Addr().String() }
+
+func (h *Host) Listen(port int)error{if err:=h.Bind(port);err!=nil{return err};fmt.Printf("Hosting as %s on %s\nTLS fingerprint: %s\n",h.ID,h.Addr(),h.Fingerprint);return h.Serve()}
+func (h *Host) handle(c net.Conn){defer c.Close();dec:=json.NewDecoder(bufio.NewReader(c));var challenge auth.Challenge;if err:=dec.Decode(&challenge);err!=nil||challenge.Type!="auth_challenge"{return};hostResponse,err:=auth.Respond(h.Identity,&challenge);if err!=nil{return};if err=h.writeJSON(c,hostResponse);err!=nil{return};ownChallenge,err:=auth.NewChallenge();if err!=nil{return};if err=h.writeJSON(c,ownChallenge);err!=nil{return};var clientResponse auth.Response;if err=dec.Decode(&clientResponse);err!=nil{return};if err=auth.Verify(ownChallenge,&clientResponse);err!=nil{_=h.writePacket(c,Packet{Type:"error",Text:"authentication failed"});return};store:=auth.Load();if err=store.Trust(clientResponse.ID,clientResponse.PublicKey);err!=nil{_=h.writePacket(c,Packet{Type:"error",Text:"peer identity key changed; refusing connection"});return};h.Mu.Lock();h.Clients[c]=struct{}{};h.Mu.Unlock();peer:=Peer{ID:clientResponse.ID};defer func(){h.Mu.Lock();delete(h.Clients,c);h.Mu.Unlock();h.announce(peer,true)}();if err=h.writePacket(c,Packet{Type:"hello",From:h.ID,Name:h.Name});err!=nil{return};h.announce(peer,false);for{var p Packet;if err:=dec.Decode(&p);err!=nil{return};if p.Type!="msg"{continue};if len([]byte(p.Text))>MaxMessageBytes{_=h.writePacket(c,Packet{Type:"error",Text:"message exceeds 4096 bytes"});continue};fmt.Printf("\r[%s] %s\n> ",p.Name,p.Text);h.broadcast(Packet{Type:"msg",From:p.From,Name:p.Name,Text:p.Text},c)}}
 func(h *Host)writeJSON(c net.Conn,v any)error{h.WriteMu.Lock();defer h.WriteMu.Unlock();return json.NewEncoder(c).Encode(v)}
 func(h *Host)writePacket(c net.Conn,p Packet)error{return h.writeJSON(c,p)}
 func(h *Host)broadcast(p Packet,except net.Conn){h.Mu.Lock();clients:=make([]net.Conn,0,len(h.Clients));for c:=range h.Clients{if c!=except{clients=append(clients,c)}};h.Mu.Unlock();for _,c:=range clients{if err:=h.writePacket(c,p);err!=nil{_=c.Close()}}}

@@ -120,26 +120,55 @@ jobs:
       - name: Write release notes
         run: |
           cat > notes.md <<'NOTES'
-          ## Talk to anyone, on any network
+          ## Just open it. Whoever types first connects.
 
           CMD-Chat is a peer-to-peer terminal chat. Your messages go **straight from your
           computer to your friend's** — there is no company server in the middle holding
           your conversation.
 
-          Until now that only worked reliably when you were both on the same Wi-Fi. This
-          release makes it work **across the internet**, with no setup on your part.
+          This release fixes the crash that closed the window when you tried to start a
+          chat, and removes the start/join step that made it necessary to agree on who
+          goes first.
+
+          ### Fixed
+
+          - **"Start a chat" no longer closes the terminal.** Picking it from the menu
+            crashed the program before it opened a single socket, and the launcher window
+            disappeared with the reason still in it. Debug mode happened to avoid the
+            crash, which is why the problem seemed to vanish there and leave only the
+            Windows firewall prompt behind.
+          - **The firewall prompt is explained instead of ignored.** If Windows blocks the
+            chat port — or you click Cancel on "blocked some features of this app" —
+            CMD-Chat now says so, tells you how to allow it, and keeps working over the
+            encrypted relay rather than looking connectable when it isn't.
+          - **The window stays open when something goes wrong.** Launchers now hold the
+            terminal on an unexpected exit and show the reason, on every platform.
+          - **The macOS and Linux launchers find the program again.** They looked for a
+            file name the release ZIP does not contain.
+          - Leaving a chat with `/quit` returns you to the prompt instead of closing
+            CMD-Chat, and a chat that the other side closes no longer leaves you typing
+            into a dead connection.
 
           ### What's new
 
-          - **Chat with people outside your Wi-Fi.** Give someone your ID and they can
-            reach you from anywhere.
-          - **No router or port-forwarding setup.** Nothing to configure, no public IP to
-            look up, no VPN.
+          - **No more "one person starts, the other joins."** Every open copy of CMD-Chat
+            is already reachable. Both of you just open it, swap IDs, and **whoever pastes
+            the other's ID first** connects — the other side does nothing and the chat
+            simply opens in front of them.
+          - **Nothing to agree on in advance**, and nothing to redo between conversations:
+            after `/quit` you are still reachable.
+          - `?`, `/id`, `/debug` and `/quit` at the prompt; the old menu numbers still
+            answer and point you at the new flow.
+          - `cmd-chat host` and `cmd-chat join` are unchanged for scripts.
+
+          ### Still true from v2.0.x
+
+          - **Chat with people outside your Wi-Fi**, with no router or port-forwarding
+            setup.
           - **It picks the best connection automatically** — your local network first, then
             a direct internet connection, and only if neither works, an encrypted relay.
             You'll see which one it used.
-          - **Works on strict networks**, including mobile hotspots and CGNAT, where a
-            direct connection is impossible.
+          - **Works on strict networks**, including mobile hotspots and CGNAT.
 
           ### How it stays private
 
@@ -162,14 +191,20 @@ jobs:
           1. Download the file for your system below.
           2. Extract the zip.
           3. Double-click the launcher inside (`Start CMD-Chat.bat` on Windows).
-          4. Pick **Start a chat**, share the ID it shows, and your friend picks **Join a chat**.
+          4. On Windows, click **Allow access** when the firewall asks.
+          5. Send your friend the ID it shows. When they have CMD-Chat open too, paste
+             their ID at the prompt — or let them paste yours.
 
           See `QUICKSTART.md` inside the download for more.
 
-          ### Known limitation
+          ### Known limitations
 
           A direct connection can still fail on very restrictive networks; when it does,
           CMD-Chat falls back to the relay automatically.
+
+          Windows still shows its firewall prompt the first time you open CMD-Chat.
+          Suppressing it would need an administrator-level firewall rule, so CMD-Chat
+          explains it instead and works either way.
           NOTES
       - name: Publish GitHub release
         # The single place a release is created. A second workflow used to publish
