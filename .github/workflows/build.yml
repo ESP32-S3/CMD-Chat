@@ -129,13 +129,48 @@ jobs:
       - name: Write release notes
         run: |
           cat > notes.md <<'NOTES'
-          ## CMD-Chat now tells you when there's a new version
+          ## Group chats, and a name of your own
 
           CMD-Chat is a peer-to-peer terminal chat. Your messages go **straight from your
           computer to your friend's** — there is no company server in the middle holding
           your conversation.
 
-          ### New in this release
+          ### Group chats
+
+          More than one person can join you now, and everyone in the room sees everyone
+          else. There is nothing to create and no room code: whoever gets connected to is
+          hosting, and **the room is that person's ID**.
+
+          - **`/invite`** shows the ID that adds someone. This is the bit that's easy to
+            get wrong — if you joined someone else, the ID to share is *theirs*, not
+            yours, because your own would start a separate chat instead. `/invite` says
+            which is which.
+          - **`/who`** lists the room, and you'll see `* Jordan joined - 3 here` as people
+            come and go.
+          - **`/group off`** turns a room back into a one-to-one chat if you're hosting.
+            Anyone already there stays; the next person to try is told why instead of
+            being dropped in silence. The setting is remembered.
+
+          **A note on trust, because it changes with rooms.** A two-person chat has no
+          trusted middle — each side authenticates the other end to end. In a room, guests
+          reach each other *through* the host. Nobody can impersonate anyone: every relayed
+          message is labelled with the identity that connection actually proved, not with
+          whatever the message claimed. But a dishonest host could forge or drop a message
+          from another member. **Host rooms with people you'd trust to carry your
+          messages.** The relay and phonebook are unaffected and still cannot read
+          anything.
+
+          ### Pick a nickname
+
+          **`/nick Alex`** and everyone sees *Alex* beside your messages instead of your
+          computer's account name.
+
+          Your nickname is stored **on your own computer only**. It is not in the
+          phonebook, not in any database, and **nobody can look it up from your ID** — it
+          reaches only the people you're actually chatting with, inside the encrypted
+          connection. `/nick` on its own puts it back.
+
+          ### Also in this release
 
           - **Update notices on launch.** CMD-Chat asks GitHub whether a newer release
             exists and tells you once if one does:

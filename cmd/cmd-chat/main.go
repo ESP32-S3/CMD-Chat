@@ -26,6 +26,7 @@ import (
 	"github.com/ESP32-S3/CMD-Chat/internal/ipc"
 	"github.com/ESP32-S3/CMD-Chat/internal/network"
 	"github.com/ESP32-S3/CMD-Chat/internal/phonebook"
+	"github.com/ESP32-S3/CMD-Chat/internal/profile"
 	"github.com/ESP32-S3/CMD-Chat/internal/relay"
 	"github.com/ESP32-S3/CMD-Chat/internal/update"
 )
@@ -38,15 +39,9 @@ const ipcAddress = "127.0.0.1:5050"
 // and the update check stays quiet rather than claiming it is out of date.
 var version = "dev"
 
-func name() string {
-	if v := os.Getenv("USERNAME"); v != "" {
-		return v
-	}
-	if v := os.Getenv("USER"); v != "" {
-		return v
-	}
-	return "user"
-}
+// name is the nickname shown next to this user's messages. It lives on this
+// computer only; see internal/profile.
+func name() string { return profile.Name() }
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--debug-child" {
@@ -199,12 +194,42 @@ func announceUpdate(release *update.Release) {
 	fmt.Println()
 }
 
+// renderPacket prints one packet from the host and reports any roster it
+// carried, so the caller can answer /who without a round trip.
+//
+// Everything printed here originates with the host, including the names beside
+// other people's messages. A guest authenticates the host and nobody else; see
+// the group chat note in the README.
+func renderPacket(p chat.Packet) (roster []chat.Member, shown bool) {
+	switch p.Type {
+	case "msg":
+		label := p.Name
+		if label == "" {
+			label = chat.ShortID(p.From)
+		}
+		fmt.Printf("\r[%s] %s\n", label, p.Text)
+		return nil, true
+	case "system":
+		fmt.Printf("\r* %s\n", p.Text)
+		return nil, true
+	case "roster":
+		// Silent by design: the join and leave notices already say what
+		// changed, and reprinting the whole room over every arrival would bury
+		// the conversation.
+		return p.Members, true
+	case "error":
+		fmt.Printf("\r! %s\n", p.Text)
+		return nil, true
+	}
+	return nil, false
+}
+
 // showPending prints messages that are already queued without waiting for more.
 func showPending(ch chan chat.Packet) {
 	for {
 		select {
 		case p := <-ch:
-			fmt.Printf("\r[%s] %s\n", p.Name, p.Text)
+			renderPacket(p)
 		default:
 			return
 		}
@@ -258,6 +283,8 @@ func openStation(id *identity.Identity, port int, publish, relayEnabled bool) (*
 	if err != nil {
 		return nil, err
 	}
+
+	h.SetGroup(profile.GroupChatEnabled())
 
 	st := &station{id: id, host: h, port: port, peers: make(chan chat.Peer, 8), left: make(chan chat.Peer, 8)}
 	h.OnPeer = func(p chat.Peer, gone bool) {
@@ -400,10 +427,16 @@ func banner(st *station) {
 	fmt.Printf("              CMD-Chat %s\n", version)
 	fmt.Println("========================================")
 	fmt.Printf("Your ID: %s\n", st.id.ID)
+	fmt.Printf("You appear as: %s\n", name())
 	fmt.Println()
 	fmt.Println("You are reachable now. Nobody has to \"start\" or \"join\" anything.")
 	fmt.Println("Send your ID to a friend, or paste theirs below - whoever types the")
 	fmt.Println("other's ID first connects, and the other side just waits here.")
+	if st.host.Group() {
+		fmt.Println("More than one person can join you; they will all see each other.")
+	} else {
+		fmt.Println("Group chat is off: only one person at a time can join you.")
+	}
 	if !st.direct {
 		fmt.Println()
 		fmt.Println("Note: direct connections are blocked on this machine; the relay is in use.")
@@ -413,9 +446,140 @@ func banner(st *station) {
 	fmt.Println()
 }
 
+// setNickname stores a new nickname and reports the result. notify lets a live
+// chat pick the change up without reconnecting.
+func setNickname(argument string, notify func(string)) {
+	wanted := profile.CleanNickname(argument)
+	if argument != "" && wanted == "" {
+		fmt.Println("That nickname has no printable characters in it.")
+		fmt.Println()
+		return
+	}
+	if err := profile.SetNickname(wanted); err != nil {
+		fmt.Printf("Could not save the nickname: %v\n", err)
+		fmt.Println()
+		return
+	}
+	if notify != nil {
+		notify(name())
+	}
+	if wanted == "" {
+		fmt.Printf("Nickname cleared. You now appear as %s.\n", name())
+	} else {
+		fmt.Printf("You now appear as %s.\n", name())
+	}
+	fmt.Println("This is stored on this computer only - it is never published.")
+	fmt.Println()
+}
+
+// setGroupChat stores the host's group-chat choice and applies it live.
+func setGroupChat(st *station, argument string) {
+	switch strings.ToLower(strings.TrimSpace(argument)) {
+	case "on", "yes", "true", "enable", "enabled":
+		apply(st, true)
+	case "off", "no", "false", "disable", "disabled":
+		apply(st, false)
+	case "":
+		if st.host.Group() {
+			fmt.Println("Group chat is ON: several people can join you and will see each other.")
+		} else {
+			fmt.Println("Group chat is OFF: only one person at a time can join you.")
+		}
+		fmt.Println("Use /group on or /group off to change it.")
+		fmt.Println()
+	default:
+		fmt.Println("Use /group on or /group off.")
+		fmt.Println()
+	}
+}
+
+func apply(st *station, enabled bool) {
+	st.host.SetGroup(enabled)
+	if err := profile.SetGroupChatEnabled(enabled); err != nil {
+		debug.Log("Could not save the group-chat setting: %v", err)
+		fmt.Printf("Applied for now, but could not save it for next time: %v\n", err)
+	}
+	if enabled {
+		fmt.Println("Group chat is ON. Several people can join you, and they will see each other.")
+	} else {
+		fmt.Println("Group chat is OFF. Only one person at a time can join you.")
+		if st.host.Count() > 1 {
+			fmt.Println("Anyone already here stays; this applies to the next person who tries.")
+		}
+	}
+	fmt.Println()
+}
+
+// showRoom prints who is in a room.
+func showRoom(members []chat.Member, roomID string) {
+	if len(members) == 0 {
+		fmt.Println("Nobody else is here yet.")
+		fmt.Println()
+		return
+	}
+	fmt.Printf("%d in this room:\n", len(members))
+	for _, m := range members {
+		role := ""
+		if m.Host {
+			role = "   host"
+		}
+		fmt.Printf("  %-24s %s%s\n", m.Display(), chat.ShortID(m.ID), role)
+	}
+	if roomID != "" {
+		fmt.Printf("Room ID: %s\n", roomID)
+	}
+	fmt.Println()
+}
+
+// showInvite explains which ID invites someone into this room.
+//
+// This is the one thing about group chat people get wrong: a guest's instinct is
+// to share its own ID, which would open a separate chat instead of adding
+// someone here. The room is always the host's ID.
+func showInvite(roomID, ownID string, hosting bool) {
+	fmt.Println()
+	fmt.Println("Share this room's ID:")
+	fmt.Println()
+	fmt.Printf("    %s\n", roomID)
+	fmt.Println()
+	if hosting {
+		fmt.Println("That is your own ID, because you are hosting. Anyone who pastes it joins you.")
+	} else {
+		fmt.Println("That is the host's ID, not yours. Anyone who pastes it lands in this room.")
+		fmt.Printf("Your own ID (%s) would start a separate chat with you instead.\n", chat.ShortID(ownID))
+	}
+	fmt.Println()
+}
+
+// splitCommand separates a leading /command from its argument.
+func splitCommand(text string) (string, string) {
+	fields := strings.SplitN(text, " ", 2)
+	command := strings.ToLower(strings.TrimSpace(fields[0]))
+	if len(fields) == 1 {
+		return command, ""
+	}
+	return command, strings.TrimSpace(fields[1])
+}
+
 // runCommand handles one line typed at the ready prompt. It returns false when
 // CMD-Chat should exit.
 func runCommand(st *station, text string, lines <-chan string) bool {
+	if command, argument := splitCommand(text); strings.HasPrefix(command, "/") {
+		switch command {
+		case "/nick", "/name":
+			setNickname(argument, func(n string) { st.host.SetName(n) })
+			return true
+		case "/group":
+			setGroupChat(st, argument)
+			return true
+		case "/who", "/room":
+			showRoom(st.host.Members(), st.id.ID)
+			return true
+		case "/invite":
+			showInvite(st.id.ID, st.id.ID, true)
+			return true
+		}
+	}
 	switch strings.ToLower(text) {
 	case "":
 		return true
@@ -459,22 +623,40 @@ func readyHelp(st *station) {
 	fmt.Println("Paste a friend's ID and press Enter to connect to them.")
 	fmt.Println("Or do nothing: they can connect to you at any time.")
 	fmt.Println()
-	fmt.Println("  /id      show your ID again")
-	fmt.Println("  /debug   open a debug terminal and record a crash log")
-	fmt.Println("  /quit    close CMD-Chat (also leaves a chat)")
+	fmt.Println("  /id            show your ID again")
+	fmt.Println("  /nick NAME     set the name others see (stored on this computer only)")
+	fmt.Println("  /group on|off  allow more than one person into chats you host")
+	fmt.Println("  /who           list who is in the room")
+	fmt.Println("  /invite        show the ID that invites someone into this room")
+	fmt.Println("  /debug         open a debug terminal and record a crash log")
+	fmt.Println("  /quit          close CMD-Chat (also leaves a chat)")
 	fmt.Println()
 	fmt.Printf("Your ID: %s\n", st.id.ID)
+	fmt.Printf("You appear as: %s\n", name())
+	if st.host.Group() {
+		fmt.Println("Group chat: ON - several people can join you and will see each other.")
+	} else {
+		fmt.Println("Group chat: OFF - only one person at a time can join you.")
+	}
 	if !st.direct {
 		fmt.Println("Direct connections are blocked here; chats go over the relay.")
 	}
 	fmt.Println()
 }
 
-// hostChat runs the chat when the other side connected to us.
-func hostChat(st *station, p chat.Peer, lines <-chan string) {
+// hostChat runs the chat when other people connected to us.
+//
+// It holds the room open for as long as anyone is in it, rather than ending on
+// the first departure: in a group chat one person leaving is an event, not the
+// end of the conversation.
+func hostChat(st *station, first chat.Peer, lines <-chan string) {
 	drain(st.left)
-	fmt.Printf("%s connected to you.\n", p.ID)
-	fmt.Println("Type messages below. /quit leaves the chat.")
+	fmt.Printf("%s connected to you.\n", peerLabel(first))
+	if st.host.Group() {
+		fmt.Println("Others can join with /invite. /who lists the room. /quit ends it.")
+	} else {
+		fmt.Println("Type messages below. /quit leaves the chat.")
+	}
 	for {
 		fmt.Print("> ")
 		select {
@@ -483,12 +665,27 @@ func hostChat(st *station, p chat.Peer, lines <-chan string) {
 				return
 			}
 			text := strings.TrimSpace(line)
-			if text == "/quit" {
+			command, argument := splitCommand(text)
+			switch command {
+			case "/quit", "/exit":
 				st.host.Disconnect()
 				drain(st.left)
+				drain(st.peers)
 				fmt.Println("Left the chat. You are still reachable.")
 				fmt.Println()
 				return
+			case "/who", "/room":
+				showRoom(st.host.Members(), st.id.ID)
+				continue
+			case "/invite":
+				showInvite(st.id.ID, st.id.ID, true)
+				continue
+			case "/nick", "/name":
+				setNickname(argument, func(n string) { st.host.SetName(n) })
+				continue
+			case "/group":
+				setGroupChat(st, argument)
+				continue
 			}
 			if text == "" {
 				continue
@@ -496,12 +693,25 @@ func hostChat(st *station, p chat.Peer, lines <-chan string) {
 			debug.Log("Host message sent: %q", text)
 			st.host.Broadcast(chat.Packet{Type: "msg", From: st.id.ID, Name: name(), Text: text})
 			fmt.Printf("\r[%s] %s\n", name(), text)
-		case <-st.left:
-			fmt.Println("\rThe other side left the chat. You are still reachable.")
-			fmt.Println()
-			return
+		case p := <-st.peers:
+			fmt.Printf("\r* %s joined - %d here\n", peerLabel(p), st.host.Count())
+		case p := <-st.left:
+			remaining := st.host.Count() - 1
+			if remaining <= 0 {
+				fmt.Printf("\r* %s left - the room is empty. You are still reachable.\n\n", peerLabel(p))
+				return
+			}
+			fmt.Printf("\r* %s left - %d here\n", peerLabel(p), st.host.Count())
 		}
 	}
+}
+
+// peerLabel names a peer by nickname when it sent one, and by ID otherwise.
+func peerLabel(p chat.Peer) string {
+	if p.Name != "" {
+		return fmt.Sprintf("%s (%s)", p.Name, chat.ShortID(p.ID))
+	}
+	return chat.ShortID(p.ID)
 }
 
 // joinPeer connects to a friend's ID from the ready prompt.
@@ -617,7 +827,7 @@ func usage() {
 	fmt.Println("  cmd-chat id")
 	fmt.Println("  cmd-chat version")
 	fmt.Println("  cmd-chat endpoint")
-	fmt.Println("  cmd-chat host [--port 38556] [--publish=false] [--relay=false]")
+	fmt.Println("  cmd-chat host [--port 38556] [--publish=false] [--relay=false] [--group=false]")
 	fmt.Println("  cmd-chat join <persistent-id>        # LAN, then direct, then relay")
 	fmt.Println("  cmd-chat join --address host:port --fingerprint SHA256...")
 	fmt.Println()
@@ -679,6 +889,7 @@ func host(id *identity.Identity, args []string) {
 	port := fs.Int("port", tcpPort, "TCP listen port")
 	publish := fs.Bool("publish", true, "publish this host to the public phonebook so peers outside this LAN can find it")
 	relayEnabled := fs.Bool("relay", true, "also wait on the relay so peers with no direct path can still connect")
+	group := fs.Bool("group", profile.GroupChatEnabled(), "let more than one person join, and let them see each other")
 	if err := fs.Parse(args); err != nil {
 		return
 	}
@@ -691,7 +902,14 @@ func host(id *identity.Identity, args []string) {
 	}
 	defer st.close()
 
+	st.host.SetGroup(*group)
 	fmt.Printf("Your ID: %s\nHosting chat for %s\nFingerprint: %s\n", id.ID, id.ID, st.host.Fingerprint)
+	fmt.Printf("You appear as: %s\n", name())
+	if *group {
+		fmt.Println("Group chat is on; several people can join and will see each other.")
+	} else {
+		fmt.Println("Group chat is off; only one person at a time can join.")
+	}
 	fmt.Println("IPC bridge: ", ipcAddress)
 	fmt.Println("Waiting for someone to connect. Type messages below; /quit exits.")
 	for {
@@ -712,9 +930,9 @@ func host(id *identity.Identity, args []string) {
 			st.host.Broadcast(chat.Packet{Type: "msg", From: id.ID, Name: name(), Text: text})
 			fmt.Printf("\r[%s] %s\n", name(), text)
 		case p := <-st.peers:
-			fmt.Printf("\r%s connected to you.\n", p.ID)
+			fmt.Printf("\r%s connected to you.\n", peerLabel(p))
 		case p := <-st.left:
-			fmt.Printf("\r%s left the chat.\n", p.ID)
+			fmt.Printf("\r%s left the chat.\n", peerLabel(p))
 		case release, ok := <-updates:
 			fmt.Print("\r")
 			if !ok {
@@ -869,13 +1087,46 @@ func chatSession(id *identity.Identity, transport net.Conn, fingerprint, expecte
 		fmt.Printf("Connection failed during handshake: %v\n", err)
 		return
 	}
+	// A host that will not take this connection says so instead of greeting.
+	// Turning that into "invalid host handshake" would report the one case with
+	// a perfectly good explanation as a protocol fault.
+	if hello.Type == "error" {
+		debug.Log("Host refused the connection: %s", hello.Text)
+		reason := strings.TrimSpace(hello.Text)
+		if reason == "" {
+			reason = "the host refused the connection"
+		}
+		fmt.Printf("Could not join: %s\n", reason)
+		fmt.Println()
+		return
+	}
 	if hello.Type != "hello" {
 		debug.Log("Invalid host handshake packet: %+v", hello)
 		fmt.Println("Connection failed: invalid host handshake")
 		return
 	}
-	fmt.Printf("Authenticated host %s (%s).\n", hello.Name, hello.From)
-	fmt.Println("Type messages below. /quit leaves the chat.")
+	hostLabel := hello.Name
+	if hostLabel == "" {
+		hostLabel = chat.ShortID(hello.From)
+	}
+	fmt.Printf("Authenticated host %s (%s).\n", hostLabel, hello.From)
+
+	// roomID is the host's ID. That, and never this guest's own ID, is what
+	// invites another person into this room.
+	roomID := hello.From
+	if roomID == "" {
+		roomID = expectedHostID
+	}
+	if hello.Group {
+		fmt.Println("This is a group room. /who lists everyone; /invite shows how to add someone.")
+	} else {
+		fmt.Println("Type messages below. /quit leaves the chat.")
+	}
+
+	// members is the host's most recent account of the room. Each roster packet
+	// replaces it wholesale rather than merging, so a departure cannot be missed
+	// by losing one update.
+	var members []chat.Member
 
 	// Incoming messages are handed to the loop below rather than printed from
 	// the reader goroutine, so that one place owns the prompt. Printing from
@@ -894,10 +1145,12 @@ func chatSession(id *identity.Identity, transport net.Conn, fingerprint, expecte
 		defer debug.Contain("chat read loop")
 		defer close(closed)
 		chat.ReadLoop(dec, func(p chat.Packet) {
-			if p.Type != "msg" {
+			switch p.Type {
+			case "msg", "roster", "system", "error":
+			default:
 				return
 			}
-			debug.Log("Message received from %s", p.From)
+			debug.Log("Packet %q received from %s", p.Type, p.From)
 			select {
 			case incoming <- p:
 			case <-leaving:
@@ -909,16 +1162,39 @@ func chatSession(id *identity.Identity, transport net.Conn, fingerprint, expecte
 		fmt.Print("> ")
 		select {
 		case p := <-incoming:
-			fmt.Printf("\r[%s] %s\n", p.Name, p.Text)
+			if updated, shown := renderPacket(p); shown {
+				if updated != nil {
+					members = updated
+				}
+			}
 		case line, ok := <-lines:
 			if !ok {
 				return
 			}
 			text := strings.TrimSpace(line)
-			if text == "/quit" {
+			command, argument := splitCommand(text)
+			switch command {
+			case "/quit", "/exit":
 				fmt.Println("Left the chat. You are still reachable.")
 				fmt.Println()
 				return
+			case "/who", "/room":
+				showRoom(members, roomID)
+				continue
+			case "/invite":
+				showInvite(roomID, id.ID, false)
+				continue
+			case "/nick", "/name":
+				setNickname(argument, func(n string) {
+					if err := chat.Rename(c, n); err != nil {
+						debug.Log("Rename failed: %v", err)
+					}
+				})
+				continue
+			case "/group":
+				fmt.Println("Only the host of a room can turn group chat on or off.")
+				fmt.Println()
+				continue
 			}
 			if text == "" {
 				continue

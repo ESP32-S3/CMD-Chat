@@ -164,6 +164,76 @@ The properties that matter:
 cmd-chat version
 ```
 
+## Group chats
+
+A room holds more than two people. There is nothing to create and no room code:
+whoever is connected to is hosting, and **the room is that host's ID**. A third
+person joins by pasting the same ID the second person did.
+
+```text
+star: what CMD-Chat does          mesh: what it does not
+
+        Sam                            Sam --- Jordan
+       /                                 \  X  /
+  alex --- Jordan                          X
+       \                                 /  X  \
+        Kim                            Kim --- (...)
+
+  one connection per person       one connection per pair
+```
+
+The host relays; the guests never connect to each other. That keeps one TCP
+connection and one NAT traversal per person instead of one per pair.
+
+- `/who` lists the room.
+- `/invite` prints the ID that adds someone. A guest's own ID would open a
+  *separate* chat, so `/invite` says explicitly which ID is which.
+- `/group off` makes a host one-to-one again; the next person to try is told
+  why rather than being dropped in silence. The setting is stored locally.
+- Join and leave notices arrive as `* Jordan joined - 3 here`.
+
+### What group chat means for trust
+
+Two-person CMD-Chat has no trusted middle: each side authenticates the other
+end to end. A room does have one, and it is worth being precise about where:
+
+- **The host cannot be impersonated, and neither can any guest.** Every message
+  a host relays is labelled with the identity that connection actually proved in
+  the Ed25519 handshake, not with whatever the packet claimed. A guest that sets
+  another member's ID and nickname on its own messages is relabelled with its
+  own. This is enforced by `TestHostRelabelsMessagesWithTheAuthenticatedIdentity`.
+- **The host is trusted for attribution between guests.** A guest authenticates
+  the host, and only the host. Messages and the roster reach it via the host, so
+  a dishonest host could forge a message from another member, drop one, or list
+  someone who is not there. In a two-person chat this is vacuous — the host is
+  your only counterparty. In a room it is a real difference.
+- **The relay and the phonebook are unaffected.** Neither can read anything; the
+  TLS session is still end to end between each guest and the host.
+
+Closing the last gap needs per-sender signatures, which the identity design
+already supports — a CMD-Chat ID is a hash of its public key, so a guest can
+check any member's key against its ID without trusting the host. That is not in
+this release. **Host a room with people you would trust to relay your messages.**
+
+## Nicknames
+
+By default you appear as your operating-system account name. `/nick Alex`
+changes it.
+
+A nickname is stored in `profile.json` next to your identity, **on your computer
+only**:
+
+- **It is never published.** The phonebook stores an ID, a public key, a
+  certificate fingerprint and short-lived addresses. A nickname is none of those,
+  and adding one would turn a directory of addresses into a directory of people.
+  `TestNicknameNeverReachesThePhonebook` asserts this against the bytes the
+  client actually sends.
+- **It only reaches people you are chatting with**, inside the authenticated
+  session.
+- **It proves nothing.** It is self-chosen and unsigned; two people may pick the
+  same one. The ID beside it is the part that is proven. Control characters are
+  stripped before a nickname is printed, so it cannot redraw someone's terminal.
+
 ## Your ID stays the same
 
 Your CMD-Chat ID is **not your IP address**.
@@ -476,6 +546,12 @@ Host without waiting on the relay (direct connections only):
 cmd-chat host --relay=false
 ```
 
+Host one-to-one instead of allowing a room:
+
+```text
+cmd-chat host --group=false
+```
+
 Join a host. CMD-Chat tries your LAN, then a direct connection, then the relay:
 
 ```text
@@ -517,6 +593,7 @@ internal/network/    connectivity and NAT-related networking
 internal/ipc/        local ChromeOS-to-Go bridge
 internal/update/     launch-time check for a newer published release
 internal/debug/      opt-in debug logging and crash reports
+internal/profile/    machine-local preferences: nickname, group-chat setting
 
 workers/phonebook/   Cloudflare Worker + D1 rendezvous directory
   src/               request handling, validation, signature verification

@@ -113,14 +113,26 @@ func TestChatOverArbitraryTransportIsOpaque(t *testing.T) {
 		}
 
 		// The host broadcasts once a client is attached; wait for that message.
-		var msg Packet
-		if err := dec.Decode(&msg); err != nil {
-			done <- err
+		//
+		// Roster and system packets legitimately arrive first now that a room can
+		// hold more than two people, so read past anything that is not a message
+		// rather than assuming the next packet is the one under test.
+		for range 16 {
+			var msg Packet
+			if err := dec.Decode(&msg); err != nil {
+				done <- err
+				return
+			}
+			if msg.Type != "msg" {
+				continue
+			}
+			if msg.Text != secret {
+				t.Errorf("received %q, want %q", msg.Text, secret)
+			}
+			done <- nil
 			return
 		}
-		if msg.Text != secret {
-			t.Errorf("received %q, want %q", msg.Text, secret)
-		}
+		t.Error("no message packet arrived within 16 packets")
 		done <- nil
 	}()
 
