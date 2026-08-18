@@ -6,10 +6,10 @@ import (
 	"fmt"
 )
 
-// TLSChannelBinding extracts the exporter value that ties a CMDC1 handshake to
+// TLSChannelBinding extracts the exporter value that ties a CMDC2 handshake to
 // one specific TLS session.
 //
-// This is the single most important function in the package. Without it, CMDC1
+// This is the single most important function in the package. Without it, CMDC2
 // would authenticate two identities to each other but say nothing about WHICH
 // connection they were authenticating over — and an attacker who terminates TLS
 // on both sides could forward the whole handshake verbatim between two sessions

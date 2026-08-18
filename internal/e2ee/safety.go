@@ -12,7 +12,7 @@ import (
 //
 // # The problem
 //
-// Everything else in CMDC1 is cryptographic. This is not, and it cannot be.
+// Everything else in CMDC2 is cryptographic. This is not, and it cannot be.
 //
 // On first contact there is nothing in the trust store to compare a peer's key
 // against. CMD-Chat closes most of that gap by making the ID a hash of the

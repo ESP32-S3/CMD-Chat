@@ -1,7 +1,7 @@
 // Package auth holds CMD-Chat's peer trust decisions.
 //
 // The cryptographic proof of an identity lives in internal/e2ee, which runs the
-// CMDC1 handshake. What lives here is the question that comes AFTER the proof:
+// CMDC2 handshake. What lives here is the question that comes AFTER the proof:
 // this peer really does hold the private key for the ID it presented — but is it
 // the same key we saw for that ID last time?
 package auth

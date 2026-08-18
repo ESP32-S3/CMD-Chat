@@ -7,7 +7,7 @@ import (
 	"io"
 )
 
-// The CMDC1 wire format.
+// The CMDC2 wire format.
 //
 // Everything — handshake flights and encrypted records alike — travels as a
 // single length-prefixed frame:
@@ -145,7 +145,7 @@ func (r *reader) lp() []byte {
 //
 // Requiring full consumption is deliberate: trailing bytes after a well-formed
 // message are the shape of a smuggling attack, where two implementations
-// disagree about where a message ends. CMDC1 rejects them.
+// disagree about where a message ends. CMDC2 rejects them.
 func (r *reader) done() error {
 	if r.err != nil {
 		return r.err

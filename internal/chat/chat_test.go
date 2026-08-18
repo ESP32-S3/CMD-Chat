@@ -99,7 +99,7 @@ func TestSendAcceptsMessageAtTheCap(t *testing.T) {
 }
 
 // Both sides can speak as soon as the handshake finishes. This is what the
-// priming record in the CMDC1 handshake exists for: without it the host, which
+// priming record in the CMDC2 handshake exists for: without it the host, which
 // speaks first, would have no sending chain.
 func TestBothSidesCanSendImmediatelyAfterHandshake(t *testing.T) {
 	host, guest := securePair(t)
@@ -125,10 +125,10 @@ func TestBothSidesCanSendImmediatelyAfterHandshake(t *testing.T) {
 // build actually supports.
 func TestHandshakeAgreesOnAVersion(t *testing.T) {
 	host, guest := securePair(t)
-	if got := host.session.Peer().Version; got != e2ee.V1 {
-		t.Fatalf("host negotiated version %d, want %d", got, e2ee.V1)
+	if got := host.session.Peer().Version; got != e2ee.V2 {
+		t.Fatalf("host negotiated version %d, want %d", got, e2ee.V2)
 	}
-	if got := guest.session.Peer().Version; got != e2ee.V1 {
-		t.Fatalf("guest negotiated version %d, want %d", got, e2ee.V1)
+	if got := guest.session.Peer().Version; got != e2ee.V2 {
+		t.Fatalf("guest negotiated version %d, want %d", got, e2ee.V2)
 	}
 }

@@ -36,7 +36,7 @@ const (
 // ErrSessionClosed is returned once a session has been closed.
 var ErrSessionClosed = errors.New("e2ee: session is closed")
 
-// Session is an established CMDC1 channel between two authenticated identities.
+// Session is an established CMDC2 channel between two authenticated identities.
 //
 // It is safe for concurrent use: one goroutine may send while another receives,
 // which is exactly what the chat layer does.
@@ -205,7 +205,7 @@ func (s *Session) Decrypt(record []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if h.version != byte(V1) {
+	if h.version != byte(V2) {
 		// A record that claims a version this build does not implement is
 		// refused rather than parsed hopefully.
 		return nil, ErrMalformed

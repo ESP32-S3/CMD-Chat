@@ -208,7 +208,7 @@ end to end. A room does have one, and it is worth being precise about where:
   someone who is not there. In a two-person chat this is vacuous — the host is
   your only counterparty. In a room it is a real difference.
 - **The relay and the phonebook are unaffected.** Neither can read anything; the
-  CMDC1 session is end to end between each guest and the host, inside TLS.
+  CMDC2 session is end to end between each guest and the host, inside TLS.
 
 Closing the last gap needs per-sender signatures, which the identity design
 already supports — a CMD-Chat ID is a hash of its public key, so a guest can
@@ -351,7 +351,7 @@ fallback, only when direct fails
               (blind)
 ```
 
-**The relay cannot read your messages.** It is a byte pipe, not a chat server. Both your TLS 1.3 session *and* your CMDC1 end-to-end session are established through the pipe, so the relay only ever sees ciphertext. A hostile relay can drop or delay traffic; it cannot read it, forge it, or impersonate your peer — and because the CMDC1 handshake is cryptographically bound to the TLS session it runs in, it cannot become a man in the middle even if it terminates TLS on both sides. That is exercised directly by `TestTLSTerminatingRelayCannotBecomeAManInTheMiddle`.
+**The relay cannot read your messages.** It is a byte pipe, not a chat server. Both your TLS 1.3 session *and* your CMDC2 end-to-end session are established through the pipe, so the relay only ever sees ciphertext. A hostile relay can drop or delay traffic; it cannot read it, forge it, or impersonate your peer — and because the CMDC2 handshake is cryptographically bound to the TLS session it runs in, it cannot become a man in the middle even if it terminates TLS on both sides. That is exercised directly by `TestTLSTerminatingRelayCannotBecomeAManInTheMiddle`.
 
 This is enforced, not just asserted — `TestChatOverArbitraryTransportIsOpaque` runs the real handshake through an observed pipe and fails if the message text, either CMD-Chat ID, or either user name appears in the bytes crossing it.
 
@@ -388,15 +388,20 @@ CMD-Chat carries **two independent layers of encryption**:
 | Layer | Protocol | Protects against |
 |---|---|---|
 | Transport | **TLS 1.3** | passive observers, tampering on the hop |
-| Application | **CMDC1** | the relay, the phonebook, Cloudflare, an ISP, and anyone who has terminated or broken TLS |
+| Application | **CMDC2** | the relay, the phonebook, Cloudflare, an ISP, and anyone who has terminated or broken TLS |
 
-CMDC1 is CMD-Chat's application-layer end-to-end protocol. It runs *inside* the
+CMDC2 is CMD-Chat's application-layer end-to-end protocol. It runs *inside* the
 TLS session and is keyed only by the two endpoints. Everything the relay moves is
 opaque ciphertext.
 
-- **SIGMA-I handshake** — mutually authenticated ephemeral X25519, signed with
-  your existing Ed25519 identity. The same pattern as IKEv2 and TLS 1.3's own
-  authentication.
+- **SIGMA-I handshake** — mutually authenticated ephemeral key agreement, signed
+  with your existing Ed25519 identity. The same pattern as IKEv2 and TLS 1.3's
+  own authentication.
+- **Post-quantum key agreement.** The exchange is hybrid **X25519 + ML-KEM-768**
+  (FIPS 203, from Go's standard library), the same construction TLS 1.3 uses.
+  Traffic recorded today cannot be decrypted by a future quantum computer, and
+  because the result is secure if *either* half is, a break in either one leaves
+  the session standing.
 - **Bound to the TLS session it runs in** (RFC 5705 exporter). A man in the
   middle who terminates TLS on both sides holds two different sessions, so the
   signatures it forwards do not verify and the handshake fails. Certificate
@@ -433,7 +438,10 @@ cryptography is implemented in this repository, and no ratchet was invented.
   two-party sessions around a human host, and **the host can read what it
   relays**. See [SECURITY.md §9](SECURITY.md#9-group-rooms-what-is-and-is-not-end-to-end).
 - It does not protect a device someone else controls.
-- There is no post-quantum key agreement yet.
+- Post-quantum protection covers **confidentiality, not authentication**. The
+  identity signatures are still Ed25519, so a quantum adversary operating live at
+  handshake time could impersonate someone — but it cannot go back and read a
+  conversation that already happened.
 
 **This code has not been independently audited.** It is not "unbreakable" and
 not "100% secure", and nothing here should be read as claiming otherwise.

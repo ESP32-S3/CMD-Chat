@@ -21,7 +21,7 @@ import (
 // Adversarial tests: an attacker who controls the relay, and therefore every
 // byte on the wire in both directions.
 //
-// This is the attacker the pre-CMDC1 design lost to. See
+// This is the attacker the pre-CMDC2 design lost to. See
 // docs/SECURITY-BASELINE.md, weakness W1.
 
 // ---------------------------------------------------------------------------
@@ -108,7 +108,7 @@ func newMITM(t *testing.T) (attacker *mitm, guestTransport net.Conn, hostTranspo
 
 // This is the central security claim of the redesign.
 //
-// The attacker holds both TLS sessions. It forwards the CMDC1 handshake
+// The attacker holds both TLS sessions. It forwards the CMDC2 handshake
 // faithfully. Both identities are genuine and both endpoints behave correctly.
 // The handshake must still fail, because the two TLS sessions produce different
 // exporter values and the signatures are over transcripts that include them.
@@ -576,7 +576,7 @@ func TestInjectedGarbageIsRejected(t *testing.T) {
 }
 
 // e2ee.TLSChannelBinding must refuse anything that is not a completed TLS 1.3
-// session, so a caller cannot accidentally run CMDC1 unbound.
+// session, so a caller cannot accidentally run CMDC2 unbound.
 func TestChannelBindingRequiresCompletedTLS13(t *testing.T) {
 	if _, err := e2ee.TLSChannelBinding(nil); err == nil {
 		t.Fatal("a nil connection produced a channel binding")

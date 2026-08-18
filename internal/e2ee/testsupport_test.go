@@ -12,7 +12,7 @@ import (
 	"github.com/ESP32-S3/CMD-Chat/internal/identity"
 )
 
-// Shared fixtures for the CMDC1 test suite.
+// Shared fixtures for the CMDC2 test suite.
 //
 // The handshake is run over net.Pipe rather than over a real TLS connection,
 // with the channel binding supplied directly. That is deliberate: it lets a test

@@ -7,19 +7,19 @@
 //
 //	TLS 1.3        protects the hop. It stops a passive observer on the Wi-Fi,
 //	               and it is what the relay's WebSocket carries.
-//	CMDC1 (e2ee)   protects the conversation. It runs INSIDE the TLS session and
+//	CMDC2 (e2ee)   protects the conversation. It runs INSIDE the TLS session and
 //	               is keyed only by the two endpoints' Ed25519 identities and
 //	               fresh ephemeral X25519 keys.
 //
 // The second layer is the one that matters against the relay, against
 // Cloudflare, against the D1 phonebook and against anyone who has terminated
-// TLS. The CMDC1 handshake is bound to the TLS session it runs in — see
+// TLS. The CMDC2 handshake is bound to the TLS session it runs in — see
 // e2ee.TLSChannelBinding — so a man in the middle cannot forward it between two
 // TLS sessions of its own.
 //
 // # Rooms are a star, and the host is a participant
 //
-// A room is N two-party CMDC1 sessions around one host. Guest-to-guest messages
+// A room is N two-party CMDC2 sessions around one host. Guest-to-guest messages
 // are decrypted by the host and re-encrypted to each recipient, because the host
 // is a person in the conversation, not a server. A guest authenticates the HOST
 // and nobody else, and the roster is the host's account of the room. This is
@@ -58,7 +58,7 @@ import (
 // MaxMessageBytes caps one message's text.
 const MaxMessageBytes = 4096
 
-// HandshakeTimeout bounds TLS plus CMDC1. A peer that stalls mid-handshake ties
+// HandshakeTimeout bounds TLS plus CMDC2. A peer that stalls mid-handshake ties
 // up a goroutine and, on the relay, a session slot.
 const HandshakeTimeout = 30 * time.Second
 
@@ -69,7 +69,7 @@ const HandshakeTimeout = 30 * time.Second
 // rename, "error", and the "rekey"/"rekey_ack" pair that keeps the ratchet
 // turning. An unrecognised type is ignored.
 //
-// Every one of these travels as CMDC1 ciphertext. Nothing in this struct is ever
+// Every one of these travels as CMDC2 ciphertext. Nothing in this struct is ever
 // written to a socket in the clear.
 type Packet struct {
 	Type string `json:"type"`
@@ -87,7 +87,7 @@ type Packet struct {
 
 // Peer identifies the other side of a completed handshake.
 //
-// ID is proven by the CMDC1 handshake. Name is a self-chosen nickname that
+// ID is proven by the CMDC2 handshake. Name is a self-chosen nickname that
 // proves nothing and must never be used to decide who someone is.
 type Peer struct {
 	ID   string
@@ -128,7 +128,7 @@ func ShortID(id string) string {
 // Conn: one authenticated, end-to-end encrypted link
 // ---------------------------------------------------------------------------
 
-// Conn is a live CMDC1 session over an established TLS connection.
+// Conn is a live CMDC2 session over an established TLS connection.
 //
 // Send and Receive may run concurrently from different goroutines, which is what
 // the chat loops do. Two concurrent Sends are serialised, because a record must
@@ -287,7 +287,7 @@ func (c *Conn) keepRatchetTurning() {
 	}
 }
 
-// credentials builds the CMDC1 identity material for a local user.
+// credentials builds the CMDC2 identity material for a local user.
 func credentials(ident *identity.Identity, nickname string) e2ee.Credentials {
 	return e2ee.Credentials{
 		ID:        ident.ID,
@@ -297,7 +297,7 @@ func credentials(ident *identity.Identity, nickname string) e2ee.Credentials {
 	}
 }
 
-// newConn wraps a completed CMDC1 session.
+// newConn wraps a completed CMDC2 session.
 func newConn(transport net.Conn, reader *bufio.Reader, session *e2ee.Session, localKey ed25519.PublicKey, firstContact bool) *Conn {
 	info := session.Peer()
 	c := &Conn{
@@ -363,7 +363,7 @@ type Host struct {
 	// people here can see each other's messages.
 	group bool
 
-	// OnPeer, when set, is called once a peer has finished the TLS and CMDC1
+	// OnPeer, when set, is called once a peer has finished the TLS and CMDC2
 	// handshake, and again with left set when that peer goes away.
 	OnPeer func(p Peer, left bool)
 
@@ -433,7 +433,7 @@ func (h *Host) systemf(format string, args ...any) {
 
 // newTLSConfig builds the per-process self-signed certificate.
 //
-// The certificate is NOT the security boundary any more. It was, before CMDC1
+// The certificate is NOT the security boundary any more. It was, before CMDC2
 // existed, and that was the flaw: the fingerprint arrived from the phonebook,
 // which is one of the parties being defended against. Pinning it is still worth
 // doing as defence in depth — a mismatch means something is wrong and the
@@ -548,7 +548,7 @@ func (h *Host) Listen(port int) error {
 // HandleConn serves one already-established transport as the host side.
 //
 // The transport may be a plain TCP connection or a relayed byte pipe; the TLS
-// session and the CMDC1 handshake are identical either way, which is what keeps
+// session and the CMDC2 handshake are identical either way, which is what keeps
 // the relay out of the trust model.
 func (h *Host) HandleConn(raw net.Conn) { h.serve(tls.Server(raw, h.TLSConfig)) }
 
@@ -740,7 +740,7 @@ const DialTimeout = 8 * time.Second
 type ClientOptions struct {
 	// Fingerprint pins the host's TLS certificate when one is known. Empty
 	// means unpinned, which is no longer dangerous on its own: peer
-	// authentication is the CMDC1 handshake, not the certificate.
+	// authentication is the CMDC2 handshake, not the certificate.
 	Fingerprint string
 
 	// ExpectHostID requires the host to authenticate as exactly this CMD-Chat
@@ -785,7 +785,7 @@ func Dial(raw net.Conn, opts ClientOptions) (*Conn, error) {
 // Three things happen here, in order, and all three must pass:
 //
 //  1. TLS 1.3, with the host's certificate pinned when a fingerprint is known.
-//  2. The CMDC1 handshake, bound to that exact TLS session.
+//  2. The CMDC2 handshake, bound to that exact TLS session.
 //  3. The trust-on-first-use check on the host's Ed25519 identity key.
 //
 // A relayed connection is authenticated exactly as strictly as a direct one,
@@ -802,7 +802,7 @@ func ClientConn(raw net.Conn, expectedFingerprint, expectedHostID, name string, 
 func clientConn(raw net.Conn, expectedFingerprint, expectedHostID, name string, ident *identity.Identity, trust e2ee.TrustPolicy) (*Conn, error) {
 	// InsecureSkipVerify is correct here and always was: there is no CA in this
 	// system and the certificate is self-signed per process. What has changed is
-	// that it is no longer load-bearing. Peer authentication is the CMDC1
+	// that it is no longer load-bearing. Peer authentication is the CMDC2
 	// handshake below, which is bound to this TLS session, so a substituted
 	// certificate does not buy an attacker a conversation — it buys a failed
 	// handshake.
@@ -848,6 +848,12 @@ func clientConn(raw net.Conn, expectedFingerprint, expectedHostID, name string, 
 		ExpectPeerID:   expectedHostID,
 	})
 	if err != nil {
+		// A version mismatch is not an authentication failure, and labelling it
+		// as one sends the user looking for an attacker when their friend just
+		// needs to update. Pass those through unwrapped.
+		if errors.Is(err, e2ee.ErrLegacyPeer) || errors.Is(err, e2ee.ErrPeerClosedHandshake) || errors.Is(err, e2ee.ErrNoCommonVersion) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("host identity authentication failed: %w", err)
 	}
 	_ = c.SetDeadline(time.Time{})

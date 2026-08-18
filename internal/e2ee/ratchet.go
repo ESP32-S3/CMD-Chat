@@ -133,7 +133,7 @@ func kdfChainKey(chain []byte) (messageKey, nextChain []byte) {
 // one record.
 //
 // Deriving the nonce from the message key rather than from a counter is the
-// reason CMDC1 cannot reuse a nonce under a key: the message key is unique per
+// reason CMDC2 cannot reuse a nonce under a key: the message key is unique per
 // (chain, index) by construction, so the (key, nonce) pair is unique too, and no
 // counter reset or state rollback can produce a collision.
 func messageKeys(messageKey []byte) (key, nonce []byte, err error) {
@@ -211,7 +211,7 @@ func (r *ratchet) next() (header, []byte, error) {
 	r.sendChain = nextChain
 
 	h := header{
-		version:    byte(V1),
+		version:    byte(V2),
 		ratchetPub: r.sendKey.PublicKey().Bytes(),
 		pn:         r.previousSent,
 		n:          r.sendCount,

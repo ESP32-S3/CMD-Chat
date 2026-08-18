@@ -19,10 +19,10 @@ CMD-Chat carries two independent layers of encryption:
 | Layer | Protocol | Protects against |
 |---|---|---|
 | Transport | TLS 1.3 | passive observers on the network, tampering on the hop |
-| Application | **CMDC1** (this document) | the relay, the phonebook, Cloudflare, an ISP, and anyone who has terminated or broken TLS |
+| Application | **CMDC2** (this document) | the relay, the phonebook, Cloudflare, an ISP, and anyone who has terminated or broken TLS |
 
-TLS is not removed and not weakened. CMDC1 sits **above** it. Every byte the
-relay moves is CMDC1 ciphertext inside a TLS record.
+TLS is not removed and not weakened. CMDC2 sits **above** it. Every byte the
+relay moves is CMDC2 ciphertext inside a TLS record.
 
 Message plaintext exists only in the memory of the two people's own computers.
 
@@ -30,7 +30,7 @@ Message plaintext exists only in the memory of the two people's own computers.
 
 ## 2. Threat model
 
-### 2.1 Attackers CMDC1 is designed to resist
+### 2.1 Attackers CMDC2 is designed to resist
 
 | Attacker | Capability | Result |
 |---|---|---|
@@ -41,9 +41,10 @@ Message plaintext exists only in the memory of the two people's own computers.
 | An active MITM that terminates TLS on both sides | full control of both TLS sessions | **handshake fails**; see §5 |
 | An attacker who later steals a long-term identity key | offline, after the fact | cannot decrypt anything captured earlier; can impersonate going forward |
 | An attacker who steals one message key | | decrypts exactly one message |
+| An attacker recording traffic now to decrypt with a future quantum computer | passive, patient | **cannot decrypt it**; see §5.3 and §8.4 |
 | An attacker who briefly compromised an endpoint and was evicted | had full session state | loses access once one DH ratchet step passes without it |
 
-### 2.2 Attackers CMDC1 does **not** resist
+### 2.2 Attackers CMDC2 does **not** resist
 
 * **A compromised endpoint, while it is compromised.** Malware on your computer
   reads your screen and your keyboard. No messaging protocol changes that.
@@ -62,7 +63,8 @@ in this repository.**
 | Purpose | Primitive | Source |
 |---|---|---|
 | Identity signatures | Ed25519 | `crypto/ed25519` |
-| Key agreement | X25519 | `crypto/ecdh` |
+| Key agreement (classical) | X25519 | `crypto/ecdh` |
+| Key agreement (post-quantum) | ML-KEM-768, FIPS 203 | `crypto/mlkem` |
 | Hashing / transcript | SHA-256 | `crypto/sha256` |
 | KDF | HKDF-SHA-256 | `golang.org/x/crypto/hkdf` |
 | Chain / MAC | HMAC-SHA-256 | `crypto/hmac` |
@@ -91,6 +93,9 @@ store.
   Diffie–Hellman) for the handshake, then the **Double Ratchet** for the record
   layer.
 
+The ephemeral Diffie–Hellman is **hybrid**: X25519 and ML-KEM-768 run together,
+exactly as TLS 1.3 does with its X25519MLKEM768 group.
+
 SIGMA is the pattern underneath IKEv2 and, in its signed-transcript form,
 underneath TLS 1.3's own authentication. It is close in shape to the Noise
 `IK`/`XX` patterns, but authenticates with signatures over a transcript rather
@@ -111,11 +116,16 @@ Roles: the guest (the side that dialled) is the **initiator**; the host is the
 ```
 Initiator                                                    Responder
 ---------                                                    ---------
-M1  type=1 | versions[] | e_i(32) | rand_i(32)          ->
-                                       <-  M2  type=2 | version | e_r(32) | rand_r(32) | lp(C2)
-M3  type=3 | lp(C3)                                     ->
-M4  priming record (empty plaintext)                    ->
+M1  type=1 | versions[] | e_i(32) | ek(1184) | rand_i(32)  ->
+                                 <-  M2  type=2 | version | e_r(32) | ct(1088) | rand_r(32) | lp(C2)
+M3  type=3 | lp(C3)                                        ->
+M4  priming record (empty plaintext)                       ->
 ```
+
+`ek` is an ML-KEM-768 encapsulation key generated fresh for this handshake; `ct`
+is the ciphertext the responder produces by encapsulating against it. The ML-KEM
+decapsulation key never leaves the initiator, and the secret it protects is
+*created by the responder* rather than carried across the network.
 
 ### 5.1 Channel binding — the man-in-the-middle defence
 
@@ -123,7 +133,7 @@ The transcript **starts** from a TLS 1.3 exporter value (RFC 8446 §7.5,
 RFC 5705):
 
 ```
-binding = TLS-Exporter("EXPORTER-CMD-Chat-CMDC1-channel-binding", nil, 32)
+binding = TLS-Exporter("EXPORTER-CMD-Chat-CMDC2-channel-binding", nil, 32)
 ```
 
 An attacker who terminates TLS on both sides holds **two different TLS
@@ -154,11 +164,13 @@ th4 = SHA256( th3 || lp(C3) )
 Every variable-length field is length-prefixed, so two different transcripts can
 never produce the same hash input.
 
-### 5.3 Handshake key schedule
+### 5.3 Hybrid key agreement, and the handshake key schedule
 
 ```
-DH  = X25519(e_i, e_r)          -- crypto/ecdh rejects an all-zero result
-PRK = HKDF-Extract(SHA-256, salt = th2, ikm = DH)
+ss_classical = X25519(e_i, e_r)         -- crypto/ecdh rejects an all-zero result
+ss_quantum   = ML-KEM-768 Encap/Decap   -- 32 bytes
+shared       = ss_quantum || ss_classical
+PRK          = HKDF-Extract(SHA-256, salt = th2, ikm = shared)
 
 k_r = HKDF-Expand(PRK, "CMD-CHAT-E2EE v1 hs responder key", 32)
 k_i = HKDF-Expand(PRK, "CMD-CHAT-E2EE v1 hs initiator key", 32)
@@ -168,6 +180,24 @@ m_i = HKDF-Expand(PRK, "CMD-CHAT-E2EE v1 hs initiator mac", 32)
 C2 = AEAD-Seal(k_r, nonce=0^12, ad = th2, AuthPayload_responder)
 C3 = AEAD-Seal(k_i, nonce=0^12, ad = th3, AuthPayload_initiator)
 ```
+
+**Why both, rather than just the post-quantum one.** Concatenate-then-KDF is the
+standard hybrid combiner, in the same order TLS uses, and the salt is a
+transcript hash that already commits to both public values. The result is secure
+if **either** component is secure:
+
+* if ML-KEM falls to classical cryptanalysis — a genuine risk for a lattice
+  scheme this young — X25519 still holds the session;
+* if a quantum computer breaks X25519, ML-KEM still holds it.
+
+Neither is trusted alone. This is strictly stronger than the X25519-only exchange
+it replaces.
+
+**Implicit rejection.** FIPS 203 specifies that decapsulating a corrupted
+ciphertext yields a *pseudorandom* secret rather than an error. So a forged `ct`
+does not fail at the KEM; it fails a few steps later when the AEAD tag on `C2`
+does not verify. An attacker learns nothing from the shape or timing of the
+failure. Only a wrong *length* is an error, and the parser fixes the length.
 
 The all-zero nonce is safe **only** because `k_r` and `k_i` each encrypt exactly
 one ciphertext in the lifetime of a session, under a key derived from a
@@ -215,8 +245,22 @@ which check fired.
 `M1` offers every version this build supports; `M2` names the one chosen, picked
 by the **responder's** preference order among what was offered. Both the offered
 list and the choice are inside the signed transcript, so stripping a version to
-force a weaker one is detected. An unsupported version fails closed. There is no
-fallback to the pre-CMDC1 handshake — that code has been deleted, not disabled.
+force a weaker one is detected. An unsupported version fails closed.
+
+Two versions exist, and only one is implemented:
+
+| Version | Key agreement | Status |
+|---|---|---|
+| **V1** | X25519 only | **refused.** Recognised only so a peer running it gets a useful message |
+| **V2** | X25519 + ML-KEM-768 | the only version this build speaks |
+
+**V1 is refused rather than supported, deliberately.** The entire point of the
+post-quantum exchange is to defeat an attacker who records traffic now and
+decrypts it decades later. A session that quietly fell back to V1 would hand that
+attacker exactly what it wants, while both users saw a connection that looked
+completely normal. So an out-of-date peer gets an error naming the problem, and
+no session. There is likewise no fallback to the pre-CMDC2 handshake — that code
+was deleted, not disabled.
 
 ### 5.6 Session keys
 
@@ -374,6 +418,30 @@ rather than half-implemented.
 Each level derives from the one above via a one-way function under a **distinct
 label**. Learning a level never yields the level above it.
 
+### 8.4 Reach of the post-quantum protection
+
+The hybrid exchange happens **once**, at the start of a session. That is enough
+to protect the whole conversation from an attacker who records traffic now and
+hopes to decrypt it later, because of the shape of the root chain:
+
+```
+RK_next = HKDF(salt = RK_current, ikm = dh_step)
+```
+
+An attacker with a quantum computer could recover every `dh_step` — those are
+X25519. It still cannot compute `RK_next`, because it never learns `RK_0`, and
+`RK_0` came from the hybrid secret. The chain stays out of reach for the whole
+session on the strength of the initial exchange alone.
+
+**What is not covered.** The identity signatures are Ed25519, so a quantum
+computer could forge one. That only helps an attacker operating **live**, at the
+moment of a handshake; it cannot be used retroactively against a conversation
+that has already happened, and the safety number (§6.2) is the backstop for a
+live impersonation. Post-quantum signatures are far larger and far less settled
+than ML-KEM, so the trade taken here is to secure confidentiality now and revisit
+authentication when the standards mature. **This is not a fully quantum-safe
+protocol; it is quantum-safe against recording.**
+
 ### 8.1 Forward secrecy
 
 The long-term Ed25519 key **signs only**. It never encrypts and never
@@ -418,7 +486,7 @@ another.**
 
 ## 9. Group rooms: what is and is not end-to-end
 
-A room is **N independent two-party CMDC1 sessions around one host**. It is not
+A room is **N independent two-party CMDC2 sessions around one host**. It is not
 group E2EE, and this document will not call it that.
 
 * Guest ↔ host is genuinely end to end.
@@ -474,7 +542,7 @@ It **cannot** see message content, nicknames, or any session key.
 * nothing else. Frames are opaque ciphertext. No message ever touches disk.
 
 It **can** drop, delay, reorder or duplicate traffic — that is denial of service,
-and CMDC1 rejects the reordered/duplicated results rather than being confused by
+and CMDC2 rejects the reordered/duplicated results rather than being confused by
 them. It **cannot** read or forge a message, and it cannot become a man in the
 middle.
 
@@ -566,9 +634,11 @@ does **not** make keys unrecoverable from a compromised machine.
 4. **Metadata is not hidden.** See §10.
 5. **Headers are not encrypted.** See §7.3.
 6. **No at-rest protection on macOS/Linux without a passphrase.** See §11.
-7. **No post-quantum key agreement.** X25519 only. Traffic captured today could
-   be decrypted by a future cryptographically relevant quantum computer. A hybrid
-   X25519+ML-KEM exchange is the natural next version.
+7. **Post-quantum confidentiality only, not post-quantum authentication.** Key
+   agreement is hybrid X25519 + ML-KEM-768, so recorded traffic is safe from a
+   future quantum computer. The Ed25519 signatures are not, so a quantum
+   adversary operating live at handshake time could impersonate someone. See
+   §8.4.
 8. **The relay can deny service.** It cannot read anything, but it can stop the
    conversation.
 9. **Endpoint compromise is out of scope**, as it is for every messenger.

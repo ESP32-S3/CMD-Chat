@@ -4,6 +4,7 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/hmac"
+	"crypto/mlkem"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -12,26 +13,64 @@ import (
 	"github.com/ESP32-S3/CMD-Chat/internal/identity"
 )
 
-// Version is a CMDC1 protocol version as it appears on the wire.
+// Sizes of the ML-KEM-768 values that travel on the wire, from FIPS 203.
+//
+// They are spelled out rather than taken from the package so that a parser
+// reading a frame cannot be steered by a value from somewhere else, and so that
+// a change in either constant is a visible change to the wire format.
+const (
+	mlkemEncapsulationKeySize = 1184
+	mlkemCiphertextSize       = 1088
+	mlkemSharedKeySize        = mlkem.SharedKeySize // 32
+)
+
+// Version is a CMDC protocol version as it appears on the wire.
 type Version uint16
 
-// V1 is the first — and currently only — CMDC1 version.
-const V1 Version = 1
+const (
+	// V1 was the classical-only version: X25519 alone for key agreement. It is
+	// recognised so that a peer running it gets a useful message instead of a
+	// parse error, and it is REFUSED. It is not implemented any more.
+	//
+	// Refusing rather than supporting it is deliberate. The whole point of the
+	// post-quantum exchange is to defeat an attacker who records traffic now and
+	// decrypts it decades later, and a session that quietly fell back to V1
+	// would hand exactly that attacker exactly what it wants — while both users
+	// saw a connection that looked entirely normal.
+	V1 Version = 1
+
+	// V2 is hybrid X25519 + ML-KEM-768 key agreement. It is the only version
+	// this build will speak.
+	V2 Version = 2
+)
 
 // SupportedVersions lists what this build will speak, most preferred first.
 //
 // A version that is not in this list is refused outright. There is no
-// "compatibility mode", no fallback to the pre-CMDC1 plaintext-inside-TLS
-// handshake, and no way for a peer to talk this build down to one: the offered
-// list and the chosen version are both inside the transcript that both sides
-// sign, so tampering is detected before any message key exists.
-var SupportedVersions = []Version{V1}
+// "compatibility mode" and no way for a peer to talk this build down to one:
+// the offered list and the chosen version are both inside the transcript that
+// both sides sign, so tampering is detected before any message key exists.
+var SupportedVersions = []Version{V2}
 
 // Errors a caller may want to distinguish. Everything else is deliberately
 // opaque.
 var (
 	// ErrNoCommonVersion means the peer offered no version this build accepts.
 	ErrNoCommonVersion = errors.New("e2ee: no mutually supported protocol version")
+	// ErrPeerClosedHandshake means the peer hung up without answering the first
+	// flight.
+	//
+	// By far the most common cause is a peer running a build from before the
+	// post-quantum exchange: the opening message is now larger, its parser
+	// rejects it, and it closes. A genuinely dropped connection looks identical
+	// from this side, though, so the wording says "probably" rather than
+	// asserting something this code cannot actually know.
+	ErrPeerClosedHandshake = errors.New("e2ee: the peer closed the connection without answering the handshake; it is probably running an older CMD-Chat")
+	// ErrLegacyPeer means the peer only speaks a version from before the
+	// post-quantum key exchange existed. It is separated from
+	// ErrNoCommonVersion so the interface can say something useful: this is an
+	// out-of-date friend, not an attack.
+	ErrLegacyPeer = errors.New("e2ee: the peer is running an older CMD-Chat without post-quantum protection; both sides need this version or newer")
 	// ErrDowngrade means the peer selected a version it was never offered.
 	ErrDowngrade = errors.New("e2ee: peer selected a protocol version that was not offered")
 	// ErrNoChannelBinding means the caller did not supply TLS exporter material.
@@ -166,7 +205,7 @@ type PeerInfo struct {
 	// a label the peer picked for itself. Never use it to decide who someone is.
 	Nickname string
 
-	// Version is the CMDC1 version both sides agreed on.
+	// Version is the CMDC2 version both sides agreed on.
 	Version Version
 }
 
@@ -340,7 +379,7 @@ func openAuth(cfg *Config, ciphertext, key, macKey, transcript []byte, sigLabel,
 	return PeerInfo{ID: payload.id, PublicKey: pub, Nickname: payload.nickname}, nil
 }
 
-// Initiate runs the CMDC1 handshake as the initiator (the guest, the side that
+// Initiate runs the CMDC2 handshake as the initiator (the guest, the side that
 // dialled) and returns a ready session.
 //
 // On any error the caller must close the underlying connection. This function
@@ -354,18 +393,26 @@ func Initiate(rw io.ReadWriter, cfg Config) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The ML-KEM decapsulation key never leaves this function. Only the
+	// encapsulation key goes on the wire, and the secret it protects is created
+	// by the responder, not carried across the network.
+	decapsulation, err := mlkem.GenerateKey768()
+	if err != nil {
+		return nil, err
+	}
 	nonce := make([]byte, 32)
 	if _, err := io.ReadFull(cfg.random(), nonce); err != nil {
 		return nil, err
 	}
 
 	offered := cfg.versions()
-	m1 := make([]byte, 0, 3+2*len(offered)+64)
+	m1 := make([]byte, 0, 2+2*len(offered)+32+mlkemEncapsulationKeySize+32)
 	m1 = append(m1, msgInit, byte(len(offered)))
 	for _, v := range offered {
 		m1 = appendU16(m1, uint16(v))
 	}
 	m1 = append(m1, ephemeral.PublicKey().Bytes()...)
+	m1 = append(m1, decapsulation.EncapsulationKey().Bytes()...)
 	m1 = append(m1, nonce...)
 	if err := writeFrame(rw, m1); err != nil {
 		return nil, err
@@ -376,10 +423,16 @@ func Initiate(rw io.ReadWriter, cfg Config) (*Session, error) {
 
 	m2, err := readFrame(rw)
 	if err != nil {
+		// A clean close here, before the peer has said anything at all, is the
+		// signature of a build that could not parse M1. See
+		// ErrPeerClosedHandshake for why this is a guess and is worded as one.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, ErrPeerClosedHandshake
+		}
 		return nil, err
 	}
-	// M2 header: type(1) | version(2) | ephemeral(32) | random(32).
-	const m2HeaderLen = 1 + 2 + 32 + 32
+	// M2 header: type(1) | version(2) | ephemeral(32) | kemCiphertext(1088) | random(32).
+	const m2HeaderLen = 1 + 2 + 32 + mlkemCiphertextSize + 32
 	if len(m2) < m2HeaderLen {
 		return nil, ErrMalformed
 	}
@@ -389,6 +442,7 @@ func Initiate(rw io.ReadWriter, cfg Config) (*Session, error) {
 	}
 	chosen := Version(r.u16())
 	peerEphemeral := r.take(32)
+	kemCiphertext := r.take(mlkemCiphertextSize)
 	_ = r.take(32) // responder random: covered by the transcript, not read directly
 	c2 := r.lp()
 	if err := r.done(); err != nil {
@@ -402,6 +456,9 @@ func Initiate(rw io.ReadWriter, cfg Config) (*Session, error) {
 		return nil, fmt.Errorf("%w: %d", ErrDowngrade, chosen)
 	}
 	if !containsVersion(SupportedVersions, chosen) {
+		if chosen == V1 {
+			return nil, ErrLegacyPeer
+		}
 		return nil, fmt.Errorf("%w: %d", ErrNoCommonVersion, chosen)
 	}
 
@@ -412,10 +469,26 @@ func Initiate(rw io.ReadWriter, cfg Config) (*Session, error) {
 	// ECDH here rejects a low-order peer key by returning an error on an
 	// all-zero shared secret, so a forced-zero-key attack fails in crypto/ecdh
 	// rather than needing a check of our own.
-	shared, err := ephemeral.ECDH(remote)
+	classical, err := ephemeral.ECDH(remote)
 	if err != nil {
 		return nil, ErrMalformed
 	}
+	defer Wipe(classical)
+
+	// ML-KEM decapsulation does not fail on a wrong ciphertext: FIPS 203
+	// specifies implicit rejection, so a forged one yields a pseudorandom secret
+	// rather than an error. That is the behaviour we want — the mismatch shows
+	// up as a failed AEAD tag on C2 a few lines below, and an attacker learns
+	// nothing from the timing or the shape of the failure. Only a wrong LENGTH
+	// is an error here, and the parser has already fixed the length.
+	quantum, err := decapsulation.Decapsulate(kemCiphertext)
+	if err != nil {
+		return nil, ErrMalformed
+	}
+	defer Wipe(quantum)
+
+	shared := hybridSecret(quantum, classical)
+	defer Wipe(shared)
 
 	th2 := hashTranscript(th1, m2[:m2HeaderLen])
 	keys, err := deriveHandshakeKeys(shared, th2)
@@ -467,7 +540,7 @@ func Initiate(rw io.ReadWriter, cfg Config) (*Session, error) {
 	return session, nil
 }
 
-// Respond runs the CMDC1 handshake as the responder (the host, the side that
+// Respond runs the CMDC2 handshake as the responder (the host, the side that
 // accepted) and returns a ready session.
 func Respond(rw io.ReadWriter, cfg Config) (*Session, error) {
 	if err := cfg.validate(); err != nil {
@@ -488,6 +561,7 @@ func Respond(rw io.ReadWriter, cfg Config) (*Session, error) {
 		offered = append(offered, Version(r.u16()))
 	}
 	peerEphemeral := r.take(32)
+	peerEncapsulationKey := r.take(mlkemEncapsulationKeySize)
 	_ = r.take(32) // initiator random
 	if err := r.done(); err != nil {
 		return nil, err
@@ -500,6 +574,9 @@ func Respond(rw io.ReadWriter, cfg Config) (*Session, error) {
 	// towards the weakest version we happen to still support.
 	chosen, ok := selectVersion(cfg.versions(), offered)
 	if !ok {
+		if containsVersion(offered, V1) {
+			return nil, ErrLegacyPeer
+		}
 		return nil, ErrNoCommonVersion
 	}
 
@@ -511,10 +588,24 @@ func Respond(rw io.ReadWriter, cfg Config) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	shared, err := ephemeral.ECDH(remote)
+	classical, err := ephemeral.ECDH(remote)
 	if err != nil {
 		return nil, ErrMalformed
 	}
+	defer Wipe(classical)
+
+	// NewEncapsulationKey768 rejects a malformed or non-canonical key, so a
+	// peer cannot smuggle a degenerate one past this point.
+	encapsulationKey, err := mlkem.NewEncapsulationKey768(peerEncapsulationKey)
+	if err != nil {
+		return nil, ErrMalformed
+	}
+	quantum, kemCiphertext := encapsulationKey.Encapsulate()
+	defer Wipe(quantum)
+
+	shared := hybridSecret(quantum, classical)
+	defer Wipe(shared)
+
 	nonce := make([]byte, 32)
 	if _, err := io.ReadFull(cfg.random(), nonce); err != nil {
 		return nil, err
@@ -523,10 +614,11 @@ func Respond(rw io.ReadWriter, cfg Config) (*Session, error) {
 	th0 := hashTranscript([]byte(labelTranscript), cfg.ChannelBinding)
 	th1 := hashTranscript(th0, m1)
 
-	m2Header := make([]byte, 0, 1+2+32+32)
+	m2Header := make([]byte, 0, 1+2+32+mlkemCiphertextSize+32)
 	m2Header = append(m2Header, msgResp)
 	m2Header = appendU16(m2Header, uint16(chosen))
 	m2Header = append(m2Header, ephemeral.PublicKey().Bytes()...)
+	m2Header = append(m2Header, kemCiphertext...)
 	m2Header = append(m2Header, nonce...)
 
 	th2 := hashTranscript(th1, m2Header)
@@ -605,4 +697,31 @@ func selectVersion(ours, theirs []Version) (Version, bool) {
 		}
 	}
 	return 0, false
+}
+
+// hybridSecret combines the post-quantum and classical shared secrets.
+//
+// # The combiner
+//
+//	shared = ss_pq || ss_classical
+//
+// and that concatenation is the IKM of HKDF-Extract, whose salt is the
+// transcript hash — which already commits to BOTH public values, the offered
+// version list, the identities and the TLS channel binding.
+//
+// This is the same shape as TLS 1.3's X25519MLKEM768 group, in the same order.
+// Concatenate-then-KDF is the standard hybrid combiner and it has the property
+// that matters: the result is secure if EITHER component is secure. So this is
+// strictly stronger than the X25519-only exchange it replaces —
+//
+//   - if ML-KEM turns out to be broken by classical cryptanalysis, which is a
+//     genuine risk for a young lattice scheme, X25519 still holds the session;
+//   - if a quantum computer breaks X25519, ML-KEM still holds it.
+//
+// Neither is trusted alone, which is the whole reason to run both rather than
+// switching to the post-quantum one outright.
+func hybridSecret(quantum, classical []byte) []byte {
+	out := make([]byte, 0, len(quantum)+len(classical))
+	out = append(out, quantum...)
+	return append(out, classical...)
 }

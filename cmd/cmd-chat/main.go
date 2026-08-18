@@ -9,6 +9,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -785,6 +786,15 @@ func reportHandshakeFailure(err error) {
 	text := err.Error()
 	fmt.Println()
 	switch {
+	case errors.Is(err, e2ee.ErrLegacyPeer) || errors.Is(err, e2ee.ErrPeerClosedHandshake):
+		fmt.Println("Could not connect: the other person is probably running an older CMD-Chat.")
+		fmt.Println()
+		fmt.Println("This version encrypts your messages against a future quantum computer, and")
+		fmt.Println("an older one cannot. CMD-Chat refuses to fall back rather than quietly")
+		fmt.Println("giving you weaker protection than you think you have.")
+		fmt.Println()
+		fmt.Printf("You both need %s or newer. Get it from\n", version)
+		fmt.Println("https://github.com/ESP32-S3/CMD-Chat/releases/latest")
 	case strings.Contains(text, "different identity key"):
 		fmt.Println("Refusing to connect: that ID is using a different identity key than before.")
 		fmt.Println()
@@ -970,6 +980,7 @@ func securityReport(id *identity.Identity) {
 	fmt.Println()
 	fmt.Printf("  Your ID              %s\n", id.ID)
 	fmt.Printf("  Message encryption   %s (end to end, above TLS 1.3)\n", e2ee.ProtocolVersionName)
+	fmt.Println("  Key agreement        hybrid X25519 + ML-KEM-768 (post-quantum)")
 	fmt.Println("  Transport            TLS 1.3, certificate pinned where published")
 
 	protection, err := identity.StoredProtection()
@@ -991,6 +1002,8 @@ func securityReport(id *identity.Identity) {
 	}
 	fmt.Println()
 	fmt.Println("What this does not protect:")
+	fmt.Println("  - a live impersonation by an attacker with a quantum computer: the")
+	fmt.Println("    identity signatures are Ed25519, so compare safety numbers with /verify")
 	fmt.Println("  - who you talk to, when, and roughly how much: the relay and the")
 	fmt.Println("    phonebook see that, and encryption does not hide it")
 	fmt.Println("  - anything on a device somebody else controls")
@@ -1250,7 +1263,7 @@ func join(id *identity.Identity, args []string) {
 	chatSession(id, result.Conn, result.Fingerprint, result.HostID, lines)
 }
 
-// chatSession runs the TLS handshake, the CMDC1 end-to-end handshake and then
+// chatSession runs the TLS handshake, the CMDC2 end-to-end handshake and then
 // the interactive loop. The transport may be LAN, direct or relayed;
 // authentication and encryption are identical in every case.
 func chatSession(id *identity.Identity, transport net.Conn, fingerprint, expectedHostID string, lines <-chan string) {
@@ -1258,7 +1271,7 @@ func chatSession(id *identity.Identity, transport net.Conn, fingerprint, expecte
 	c, err := chat.ClientConn(transport, fingerprint, expectedHostID, name(), id)
 	if err != nil {
 		debug.Log("Handshake failed: %v", err)
-		fmt.Printf("Connection failed: %v\n", err)
+		reportHandshakeFailure(err)
 		_ = transport.Close()
 		return
 	}

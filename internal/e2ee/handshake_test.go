@@ -3,6 +3,7 @@ package e2ee
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/mlkem"
 	"errors"
 	"net"
 	"strings"
@@ -48,7 +49,7 @@ func TestHandshakeSucceedsAndBothSidesAgree(t *testing.T) {
 	if r.initiator.Peer().Nickname != "bob" || r.responder.Peer().Nickname != "alice" {
 		t.Error("nicknames did not survive the handshake intact")
 	}
-	if r.initiator.Peer().Version != V1 || r.responder.Peer().Version != V1 {
+	if r.initiator.Peer().Version != V2 || r.responder.Peer().Version != V2 {
 		t.Error("the two sides did not settle on the same protocol version")
 	}
 }
@@ -257,32 +258,64 @@ func TestHandshakeFailsClosedWithNoCommonVersion(t *testing.T) {
 	}
 }
 
-// A responder that picks a version the initiator never offered is rejected
-// outright, before any signature check.
-func TestInitiatorRejectsAVersionItNeverOffered(t *testing.T) {
+// A version outside the offered set can never be the one negotiated.
+func TestNegotiatedVersionIsAlwaysOneThatWasOffered(t *testing.T) {
 	alice, bob := testIdent(t), testIdent(t)
 	b := binding(t)
 
-	// The responder claims to support a version the initiator did not offer, and
-	// selects it. Its own preference order puts the bogus version first.
+	// The responder's own preference list leads with a version the initiator
+	// never offered. It must not be able to select it.
+	r := handshake(t,
+		Config{Credentials: creds(alice, "alice"), ChannelBinding: b, Trust: allowAny{}, Versions: []Version{V2}},
+		Config{Credentials: creds(bob, "bob"), ChannelBinding: b, Trust: allowAny{}, Versions: []Version{0xC0DE, V2}},
+	)
+	if r.initErr != nil {
+		t.Fatalf("the handshake failed on a legitimate pairing: %v", r.initErr)
+	}
+	defer r.initiator.Close()
+	defer r.responder.Close()
+
+	if got := r.initiator.Peer().Version; got != V2 {
+		t.Fatalf("negotiated version %d, which was never offered", got)
+	}
+}
+
+// Requirement 13 and the reason the post-quantum exchange exists: a peer that
+// only speaks the classical-only V1 must be REFUSED, not quietly accommodated.
+//
+// A silent fallback here would hand an attacker who records traffic today
+// exactly what post-quantum protection is meant to deny it, while both users saw
+// a connection that looked completely normal.
+func TestClassicalOnlyPeerIsRefused(t *testing.T) {
+	alice, bob := testIdent(t), testIdent(t)
+	b := binding(t)
+
 	r := handshake(t,
 		Config{Credentials: creds(alice, "alice"), ChannelBinding: b, Trust: allowAny{}, Versions: []Version{V1}},
-		Config{Credentials: creds(bob, "bob"), ChannelBinding: b, Trust: allowAny{}, Versions: []Version{0xC0DE, V1}},
+		Config{Credentials: creds(bob, "bob"), ChannelBinding: b, Trust: allowAny{}},
 	)
-	// selectVersion honours the responder's own list first, but only among what
-	// was offered, so this particular pairing still lands on V1. The property
-	// under test is that nothing outside the offered set can ever be chosen.
-	if r.initErr == nil && r.initiator.Peer().Version != V1 {
-		t.Fatalf("negotiated version %d, which was never offered", r.initiator.Peer().Version)
-	}
-	if r.initErr != nil && !errors.Is(r.initErr, ErrDowngrade) && !errors.Is(r.initErr, ErrNoCommonVersion) {
-		t.Fatalf("unexpected failure: %v", r.initErr)
-	}
-	if r.initiator != nil {
-		r.initiator.Close()
-	}
-	if r.responder != nil {
+	if r.respErr == nil {
 		r.responder.Close()
+		t.Fatal("a classical-only peer was accepted; the post-quantum exchange can be skipped")
+	}
+	if !errors.Is(r.respErr, ErrLegacyPeer) {
+		t.Fatalf("got %v, want ErrLegacyPeer", r.respErr)
+	}
+	// The message has to be usable by a person, not just by a switch statement.
+	if !strings.Contains(r.respErr.Error(), "older CMD-Chat") {
+		t.Fatalf("the error does not explain itself: %v", r.respErr)
+	}
+}
+
+// V1 must not merely be unsupported — it must be unimplemented. If the constant
+// ever reappeared in SupportedVersions, the test above would still pass while
+// the protection silently disappeared.
+func TestV1IsNotSupported(t *testing.T) {
+	if containsVersion(SupportedVersions, V1) {
+		t.Fatal("V1 is back in SupportedVersions; sessions can fall back to classical-only key agreement")
+	}
+	if len(SupportedVersions) != 1 || SupportedVersions[0] != V2 {
+		t.Fatalf("SupportedVersions = %v, want exactly [V2]", SupportedVersions)
 	}
 }
 
@@ -530,7 +563,7 @@ func TestMalformedPayloadIsRejected(t *testing.T) {
 
 // crypto/ed25519 follows RFC 8032 and does NOT reject small-order public keys:
 // an all-zero signature verifies under the all-zero key. This documents that
-// fact and pins the check that stops it reaching CMDC1.
+// fact and pins the check that stops it reaching CMDC2.
 func TestSmallOrderIdentityKeysAreRefused(t *testing.T) {
 	zero := make(ed25519.PublicKey, ed25519.PublicKeySize)
 
@@ -574,5 +607,299 @@ func TestHandshakeRefusesADegenerateIdentityKey(t *testing.T) {
 		r.initiator.Close()
 		r.responder.Close()
 		t.Fatal("a degenerate identity key produced a working session")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Post-quantum key agreement
+// ---------------------------------------------------------------------------
+
+// The wire format must actually carry the ML-KEM values. Without this, every
+// other post-quantum claim could be true of a build that quietly dropped them.
+func TestHandshakeCarriesTheMLKEMValuesOnTheWire(t *testing.T) {
+	alice, bob := testIdent(t), testIdent(t)
+	b := binding(t)
+
+	var m1Len, m2Len int
+	tamper := func(frame []byte, i int) []byte {
+		if i == 0 {
+			if m1Len == 0 {
+				m1Len = len(frame)
+			} else if m2Len == 0 {
+				m2Len = len(frame)
+			}
+		}
+		return frame
+	}
+
+	if initErr, respErr := handshakeThroughProxy(t, alice, bob, b, b, tamper); initErr != nil || respErr != nil {
+		t.Fatalf("handshake: %v / %v", initErr, respErr)
+	}
+
+	// M1 = type(1) + count(1) + versions(2n) + x25519(32) + encapsulation key + random(32).
+	wantM1 := 1 + 1 + 2*len(SupportedVersions) + 32 + mlkemEncapsulationKeySize + 32
+	if m1Len != wantM1 {
+		t.Fatalf("M1 is %d bytes, want %d; the ML-KEM encapsulation key is not on the wire", m1Len, wantM1)
+	}
+	// M2 = type(1) + version(2) + x25519(32) + ciphertext + random(32) + lp(C2).
+	minM2 := 1 + 2 + 32 + mlkemCiphertextSize + 32
+	if m2Len < minM2 {
+		t.Fatalf("M2 is %d bytes, below the %d-byte minimum; the ML-KEM ciphertext is not on the wire", m2Len, minM2)
+	}
+}
+
+// The post-quantum secret must genuinely feed the session key.
+//
+// This is the test that would catch a combiner wired up to ignore one half.
+// Corrupting only the ML-KEM ciphertext — leaving X25519 completely intact —
+// must break the handshake. If it did not, the post-quantum component would be
+// decorative.
+func TestCorruptingOnlyTheMLKEMCiphertextBreaksTheHandshake(t *testing.T) {
+	alice, bob := testIdent(t), testIdent(t)
+	b := binding(t)
+
+	// M2 layout: type(1) | version(2) | x25519(32) | kemCiphertext(1088) | ...
+	// Flip a bit inside the ML-KEM ciphertext only.
+	const kemOffset = 1 + 2 + 32
+	flipped := false
+	tamper := func(frame []byte, i int) []byte {
+		// The responder's first frame is M2.
+		if flipped || i != 0 || len(frame) < kemOffset+mlkemCiphertextSize {
+			return frame
+		}
+		flipped = true
+		out := append([]byte(nil), frame...)
+		out[kemOffset+10] ^= 0x01
+		return out
+	}
+
+	initErr, respErr := handshakeThroughProxy(t, alice, bob, b, b, tamper)
+	if !flipped {
+		t.Fatal("the ML-KEM ciphertext was never reached; the test did not exercise anything")
+	}
+	if initErr == nil && respErr == nil {
+		t.Fatal("corrupting the ML-KEM ciphertext left the handshake working: the post-quantum secret is not reaching the key schedule")
+	}
+}
+
+// And the same in the other direction: corrupting only the X25519 key must also
+// break it. Neither component may be load-bearing on its own.
+func TestCorruptingOnlyTheX25519KeyBreaksTheHandshake(t *testing.T) {
+	alice, bob := testIdent(t), testIdent(t)
+	b := binding(t)
+
+	const x25519Offset = 1 + 2
+	flipped := false
+	tamper := func(frame []byte, i int) []byte {
+		if flipped || i != 0 || len(frame) < x25519Offset+32 {
+			return frame
+		}
+		flipped = true
+		out := append([]byte(nil), frame...)
+		out[x25519Offset+5] ^= 0x01
+		return out
+	}
+
+	initErr, respErr := handshakeThroughProxy(t, alice, bob, b, b, tamper)
+	if initErr == nil && respErr == nil {
+		t.Fatal("corrupting the X25519 key left the handshake working")
+	}
+}
+
+// A malformed ML-KEM encapsulation key must be rejected rather than fed to the
+// KEM.
+func TestMalformedEncapsulationKeyIsRejected(t *testing.T) {
+	bob := testIdent(t)
+
+	// A well-formed M1 in every respect except the encapsulation key.
+	m1 := []byte{msgInit, 1}
+	m1 = appendU16(m1, uint16(V2))
+	m1 = append(m1, make([]byte, 32)...)                                      // x25519
+	m1 = append(m1, bytes.Repeat([]byte{0xFF}, mlkemEncapsulationKeySize)...) // not a valid key
+	m1 = append(m1, make([]byte, 32)...)                                      // random
+
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+	defer serverSide.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		_ = serverSide.SetDeadline(time.Now().Add(3 * time.Second))
+		session, err := Respond(serverSide, Config{
+			Credentials: creds(bob, "bob"), ChannelBinding: binding(t), Trust: allowAny{},
+		})
+		if session != nil {
+			session.Close()
+		}
+		done <- err
+	}()
+
+	_ = clientSide.SetDeadline(time.Now().Add(3 * time.Second))
+	_ = writeFrame(clientSide, m1)
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a malformed ML-KEM encapsulation key produced a session")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the responder hung on a malformed encapsulation key")
+	}
+}
+
+// The combiner must use both halves, in a fixed order, and must not lose bytes.
+func TestHybridSecretCombinesBothHalves(t *testing.T) {
+	quantum := bytes.Repeat([]byte{0xAA}, mlkemSharedKeySize)
+	classical := bytes.Repeat([]byte{0xBB}, 32)
+
+	combined := hybridSecret(quantum, classical)
+	if len(combined) != len(quantum)+len(classical) {
+		t.Fatalf("combined secret is %d bytes, want %d", len(combined), len(quantum)+len(classical))
+	}
+	if !bytes.Equal(combined[:len(quantum)], quantum) {
+		t.Fatal("the post-quantum half is not first, or was altered")
+	}
+	if !bytes.Equal(combined[len(quantum):], classical) {
+		t.Fatal("the classical half is missing or was altered")
+	}
+
+	// Changing either half must change the result.
+	otherQuantum := bytes.Repeat([]byte{0xAB}, mlkemSharedKeySize)
+	if bytes.Equal(hybridSecret(otherQuantum, classical), combined) {
+		t.Fatal("changing the post-quantum half did not change the combined secret")
+	}
+	otherClassical := bytes.Repeat([]byte{0xBC}, 32)
+	if bytes.Equal(hybridSecret(quantum, otherClassical), combined) {
+		t.Fatal("changing the classical half did not change the combined secret")
+	}
+}
+
+// Two handshakes between the same identities must produce different session
+// keys. ML-KEM encapsulation is randomised, as is X25519, so nothing about a
+// repeat connection may be predictable.
+func TestRepeatedHandshakesProduceIndependentSessions(t *testing.T) {
+	alice, bob := testIdent(t), testIdent(t)
+
+	tags := map[string]bool{}
+	for i := range 5 {
+		b := binding(t)
+		r := handshake(t,
+			Config{Credentials: creds(alice, "alice"), ChannelBinding: b, Trust: allowAny{}},
+			Config{Credentials: creds(bob, "bob"), ChannelBinding: b, Trust: allowAny{}},
+		)
+		if r.initErr != nil || r.respErr != nil {
+			t.Fatalf("handshake %d: %v / %v", i, r.initErr, r.respErr)
+		}
+		r.initiator.mu.Lock()
+		tag := string(r.initiator.associated)
+		r.initiator.mu.Unlock()
+		if tags[tag] {
+			t.Fatalf("handshake %d reproduced an earlier session tag", i)
+		}
+		tags[tag] = true
+		r.initiator.Close()
+		r.responder.Close()
+	}
+}
+
+// The two tests above corrupt a value that is also inside the transcript, so
+// either the transcript hash or the shared secret could be what rejected them.
+// This isolates the question: with the transcript held FIXED, does changing only
+// the post-quantum half of the shared secret change the derived keys?
+//
+// If it does not, the ML-KEM exchange is decorative and every post-quantum claim
+// in SECURITY.md is false.
+func TestPostQuantumHalfAloneChangesTheDerivedKeys(t *testing.T) {
+	transcript := bytes.Repeat([]byte{0x42}, 32)
+	quantum := bytes.Repeat([]byte{0xAA}, mlkemSharedKeySize)
+	classical := bytes.Repeat([]byte{0xBB}, 32)
+
+	base, err := deriveHandshakeKeys(hybridSecret(quantum, classical), transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Change ONLY the post-quantum half. Same transcript, same X25519 secret.
+	alteredQuantum := append([]byte(nil), quantum...)
+	alteredQuantum[0] ^= 0x01
+	pqChanged, err := deriveHandshakeKeys(hybridSecret(alteredQuantum, classical), transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(base.prk, pqChanged.prk) {
+		t.Fatal("changing only the ML-KEM secret left the handshake secret identical: the post-quantum exchange does not reach the key schedule")
+	}
+	for name, pair := range map[string][2][]byte{
+		"responder key": {base.respKey, pqChanged.respKey},
+		"initiator key": {base.initKey, pqChanged.initKey},
+		"responder mac": {base.respMAC, pqChanged.respMAC},
+		"initiator mac": {base.initMAC, pqChanged.initMAC},
+	} {
+		if bytes.Equal(pair[0], pair[1]) {
+			t.Fatalf("the %s did not change when the ML-KEM secret did", name)
+		}
+	}
+
+	// And symmetrically: changing only the classical half must also change them,
+	// so neither component can be silently dropped.
+	alteredClassical := append([]byte(nil), classical...)
+	alteredClassical[0] ^= 0x01
+	classicalChanged, err := deriveHandshakeKeys(hybridSecret(quantum, alteredClassical), transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(base.prk, classicalChanged.prk) {
+		t.Fatal("changing only the X25519 secret left the handshake secret identical")
+	}
+
+	// The two single-sided changes must not collide with each other either.
+	if bytes.Equal(pqChanged.prk, classicalChanged.prk) {
+		t.Fatal("the two halves are interchangeable; the combiner is losing information")
+	}
+}
+
+// Both sides must derive the SAME post-quantum secret, or nothing would decrypt.
+// This exercises the KEM round trip directly, independent of the handshake.
+func TestMLKEMRoundTripAgrees(t *testing.T) {
+	decapsulation, err := mlkem.GenerateKey768()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encapsulationKey, err := mlkem.NewEncapsulationKey768(decapsulation.EncapsulationKey().Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sent, ciphertext := encapsulationKey.Encapsulate()
+	if len(ciphertext) != mlkemCiphertextSize {
+		t.Fatalf("ciphertext is %d bytes, the wire format expects %d", len(ciphertext), mlkemCiphertextSize)
+	}
+	if len(sent) != mlkemSharedKeySize {
+		t.Fatalf("shared secret is %d bytes, want %d", len(sent), mlkemSharedKeySize)
+	}
+	if len(decapsulation.EncapsulationKey().Bytes()) != mlkemEncapsulationKeySize {
+		t.Fatalf("encapsulation key is %d bytes, the wire format expects %d",
+			len(decapsulation.EncapsulationKey().Bytes()), mlkemEncapsulationKeySize)
+	}
+
+	received, err := decapsulation.Decapsulate(ciphertext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(sent, received) {
+		t.Fatal("the two sides derived different post-quantum secrets")
+	}
+
+	// FIPS 203 specifies implicit rejection: a corrupted ciphertext yields a
+	// pseudorandom secret rather than an error. Pinning that here documents why
+	// the handshake does not treat a decapsulation error as the rejection path.
+	corrupted := append([]byte(nil), ciphertext...)
+	corrupted[0] ^= 0x01
+	other, err := decapsulation.Decapsulate(corrupted)
+	if err != nil {
+		t.Fatalf("a corrupted ciphertext returned an error rather than implicit rejection: %v", err)
+	}
+	if bytes.Equal(other, received) {
+		t.Fatal("a corrupted ciphertext produced the correct shared secret")
 	}
 }

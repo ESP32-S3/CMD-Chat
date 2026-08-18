@@ -21,7 +21,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23.x'
+          go-version: '1.24.x'
       - name: Download dependencies
         run: go mod download
       - name: Run tests
@@ -78,7 +78,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23.x'
+          go-version: '1.24.x'
       - name: Build terminal application
         shell: bash
         env:
@@ -129,153 +129,92 @@ jobs:
       - name: Write release notes
         run: |
           cat > notes.md <<'NOTES'
-          ## Real end-to-end encryption
+          ## Post-quantum encryption
 
           CMD-Chat is a peer-to-peer terminal chat. Your messages go **straight from your
           computer to your friend's** — there is no company server in the middle holding
           your conversation.
 
-          This release rebuilds the messaging cryptography. Until now, everything rested
-          on a single TLS 1.3 connection. That protected you from someone watching the
-          Wi-Fi, but it left one real gap: an attacker who could terminate TLS on both
-          sides — which is exactly the position the relay and the phonebook sit in — could
-          have forwarded the identity handshake between two connections of its own and sat
-          in the middle of a conversation both people believed was private.
+          v2.2.0 added real end-to-end encryption. This release closes the last big gap in
+          it: **"record it now, decrypt it in twenty years."**
 
-          **That gap is closed, and a second layer of encryption now sits above TLS.**
+          ### The problem this solves
 
-          ### CMDC1, the new end-to-end layer
+          The maths protecting your messages until now — X25519 — is safe against every
+          computer that exists. It is *not* safe against a large quantum computer, and
+          those may well exist eventually.
 
-          Every message is now encrypted a second time, inside the TLS session, with keys
-          only your two computers ever hold. The relay, the phonebook, Cloudflare and your
-          ISP see nothing but ciphertext.
+          That matters more than it sounds, because an attacker does not have to wait to
+          act. They can record your encrypted traffic **today**, sit on it, and decrypt it
+          whenever the hardware arrives. Anything you say now is only as private as the
+          weakest computer that will ever exist.
 
-          - **A modern authenticated handshake** — mutually authenticated ephemeral X25519,
-            signed with the Ed25519 identity you already have. The same pattern used by
-            IKEv2 and by TLS 1.3 itself.
-          - **Tied to the exact connection it runs on.** This is what closes the gap above.
-            An attacker in the middle holds two different TLS sessions, so the signatures
-            it forwards don't verify, and the connection is refused instead of quietly
-            succeeding.
-          - **A Double Ratchet**, the published algorithm used by Signal, unmodified. Every
-            single message gets its own key and its own nonce.
-          - **Forward secrecy.** Your identity key signs; it never encrypts. If someone
-            steals it a year from now, they still cannot read anything they recorded today.
-          - **Recovery after a compromise.** Fresh key material is mixed in every time your
-            friend replies, and an idle chat asks for it, so an attacker who briefly got
-            into a device loses access again once they're out.
-          - **Replays and tampering are rejected.** A message key is destroyed the moment
-            it is used, so no captured message can ever be delivered twice. Reordered and
-            lost messages still work; modified ones are refused without disturbing the
-            conversation.
+          ### What changed
 
-          ### Checking who you're actually talking to
+          The key exchange is now **hybrid X25519 + ML-KEM-768** — the same construction
+          TLS 1.3 uses, and the same one Signal and Apple deployed for the same reason.
+          ML-KEM is the NIST standard (FIPS 203) for post-quantum key exchange, and this
+          uses the implementation from Go's own standard library.
 
-          - **`/verify`** shows a **safety number** — a short code derived from both of
-            your identity keys. Read it to each other on a call. If it matches, nobody is
-            between you. CMD-Chat shows it automatically the first time you connect to
-            someone and says plainly that it *is* the first time.
-          - **A changed identity key stops the connection.** If an ID you've talked to
-            before turns up with a different key, CMD-Chat refuses and explains why. There
-            is no "accept anyway" button, because an attacker could arrange for you to see
-            one. If your friend genuinely reinstalled, `cmd-chat forget <their-id>` is a
-            deliberate step you take after checking with them some other way.
-          - **The directory can no longer point you at the wrong person.** A phonebook
-            answer for a different ID, or a LAN reply from a machine claiming someone
-            else's ID, is now discarded. The ID CMD-Chat requires is always the one *you*
-            typed.
+          **Both** algorithms run, and their results are combined. That is the point:
 
-          ### Your identity key is now protected on disk
+          - if a quantum computer breaks X25519, ML-KEM still holds your session
+          - if ML-KEM turns out to be broken by an ordinary computer — a real risk for
+            maths this new — X25519 still holds it
 
-          - **On Windows**, your private key is sealed by the operating system to your user
-            account. Copying `identity.json` to another machine gets an attacker nothing.
-          - **On any platform**, set `CMD_CHAT_IDENTITY_PASSPHRASE` to encrypt it with a
-            passphrase (scrypt + XChaCha20-Poly1305). This is the strongest option.
-          - **`cmd-chat security`** tells you which protection is actually in use, rather
-            than leaving you to guess.
-          - **Message text is never written to the debug log.** It used to be.
+          Neither is trusted on its own, so this is strictly stronger than what came
+          before rather than a bet on the newer option.
 
-          ### Being straight with you about the limits
+          The exchange happens once, when you connect, and that is enough to protect the
+          whole conversation. Everything afterwards is derived from it in a way that
+          cannot be unwound without it.
 
-          There is a new **[SECURITY.md](https://github.com/ESP32-S3/CMD-Chat/blob/main/SECURITY.md)**
-          with the full threat model, the exact key schedule, and a list of what is *not*
-          protected. The short version:
+          ### Being straight about what this does and doesn't cover
 
-          - **Encryption does not hide metadata.** The phonebook sees who is online and who
-            looks up whom; the relay sees two IDs, two IP addresses, and message sizes and
-            timing.
-          - **Group rooms are not group end-to-end encryption.** A room is a set of
-            two-person encrypted links around a human host, so **the host can read what it
-            passes between guests**. Host rooms with people you'd trust to carry your
-            messages.
-          - **No post-quantum protection yet.**
-          - **This code has not been independently audited.** It is not unbreakable and not
-            "100% secure", and this release does not claim to be.
+          **Covered:** somebody recording your conversation now and trying to read it
+          later, however long they wait. That threat is closed.
+
+          **Not covered:** the signatures proving *who you are* are still Ed25519, which a
+          quantum computer could forge. But that only helps an attacker acting **live**, at
+          the exact moment you connect — they cannot go back and impersonate someone in a
+          conversation that already happened. Post-quantum signatures are much larger and
+          much less settled than ML-KEM, so the honest trade is to take the confidentiality
+          win now and revisit the rest when the standards mature.
+
+          So: **this is quantum-safe against recording, not fully quantum-safe.** The full
+          picture is in
+          [SECURITY.md](https://github.com/ESP32-S3/CMD-Chat/blob/main/SECURITY.md).
+
+          ### Everything from v2.2.0 is still here
+
+          - **End-to-end encryption above TLS**, so the relay, the phonebook, Cloudflare
+            and your ISP see nothing but scrambled bytes — including if they try to sit in
+            the middle and impersonate your friend.
+          - **A Double Ratchet**, so every message has its own key, old messages stay safe
+            if your identity key is stolen later, and a conversation repairs itself after a
+            device is compromised.
+          - **`/verify`** shows a safety number to compare with the other person out loud.
+            Still the single most useful thing you can do, and still the one gap software
+            cannot close by itself.
+          - **A changed identity key stops the connection**, with no "accept anyway".
+          - **Your private key is sealed on disk** — Windows DPAPI by default, or
+            `CMD_CHAT_IDENTITY_PASSPHRASE` on any platform.
+          - **Group chats**, `/invite`, `/who`, `/group off`, and `/nick`.
 
           ### Compatibility
 
-          The protocol changed, so **both people need this version**. An older build cannot
-          connect, and it fails with a clear message rather than falling back to something
-          weaker. Your ID and your existing contacts carry over unchanged.
+          **Both people need v2.3.0.** A v2.2.0 client is refused rather than quietly
+          falling back to the non-quantum-safe exchange, because a silent fallback would
+          hand a recording attacker exactly what this release is meant to deny them. You
+          get a clear message telling you to update, not a confusing failure. Your ID and
+          your existing contacts carry over unchanged.
 
-          ### Also in this release
+          ### Also
 
-          - `/verify`, `cmd-chat forget`, and `cmd-chat security`.
-          - Message lengths are padded, so a short message and a long one look the same
-            size on the wire.
-          - Over a hundred new tests, including adversarial ones that run a real
-            man-in-the-middle holding both TLS sessions and confirm it gets nothing.
+          - `cmd-chat security` now reports the post-quantum status of your install.
+          - Builds moved to Go 1.24, which is where `crypto/mlkem` lives.
 
-          ## Also new: group chats, and a name of your own
-
-          These landed alongside the encryption work and ship for the first time here.
-
-          ### Group chats
-
-          More than one person can join you now, and everyone in the room sees everyone
-          else. There is nothing to create and no room code: whoever gets connected to is
-          hosting, and **the room is that person's ID**.
-
-          - **`/invite`** shows the ID that adds someone. This is the bit that's easy to
-            get wrong — if you joined someone else, the ID to share is *theirs*, not
-            yours, because your own would start a separate chat instead.
-          - **`/who`** lists the room, and you'll see `* Jordan joined - 3 here` as people
-            come and go.
-          - **`/group off`** turns a room back into a one-to-one chat if you're hosting.
-            Anyone already there stays; the next person to try is told why instead of
-            being dropped in silence. The setting is remembered.
-
-          **Read the note above about what a room is.** Every link in it is individually
-          end-to-end encrypted, and nobody can impersonate anyone — every relayed message
-          is labelled with the identity that connection actually proved, not with whatever
-          the message claimed. But guests reach each other *through* the host, so the host
-          can read what it passes on. Host rooms with people you'd trust to carry your
-          messages.
-
-          ### Pick a nickname
-
-          **`/nick Alex`** and everyone sees *Alex* beside your messages instead of your
-          computer's account name.
-
-          Your nickname is stored **on your own computer only**. It is not in the
-          phonebook, not in any database, and **nobody can look it up from your ID** — it
-          reaches only the people you're actually chatting with, inside the encrypted
-          connection. `/nick` on its own puts it back.
-
-          ### Update notices on launch
-
-          CMD-Chat asks GitHub whether a newer release exists and tells you once if one
-          does. It **never installs anything**, **sends nothing about you** — one anonymous
-          request asking what the newest version is — and **never delays launch**. Turn it
-          off with `CMD_CHAT_NO_UPDATE_CHECK=1`.
-
-          ### Carried over from v2.1.4
-
-          - "Start a chat" no longer closes the terminal, and a blocked Windows firewall
-            port is explained instead of silently breaking connectivity.
-          - The window stays open when something goes wrong, on every platform.
-          - Leaving a chat with `/quit` returns you to the prompt instead of closing
-            CMD-Chat.
+          **This code has not been independently audited.**
           NOTES
       - name: Publish GitHub release
         # The single place a release is created. A second workflow used to publish

@@ -13,7 +13,7 @@ import (
 // It signed only "CMD-CHAT/1" || ID || nonce, which said nothing about WHICH TLS
 // session it ran inside, so an attacker terminating TLS on both sides could
 // forward it verbatim and sit in the middle of an apparently authenticated
-// conversation. Peer authentication is now internal/e2ee's CMDC1 handshake,
+// conversation. Peer authentication is now internal/e2ee's CMDC2 handshake,
 // which is bound to the TLS session by an RFC 5705 exporter and cannot be
 // forwarded. See docs/SECURITY-BASELINE.md, weakness W1.
 func Fingerprint(publicKey string) string {

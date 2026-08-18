@@ -1,8 +1,8 @@
 // Package e2ee implements the CMD-Chat application-layer end-to-end encrypted
-// channel: protocol CMDC1.
+// channel: protocol CMDC2.
 //
-// It sits ABOVE TLS 1.3 and does not replace it. TLS protects the hop; CMDC1
-// protects the conversation. Everything CMDC1 writes is opaque ciphertext to
+// It sits ABOVE TLS 1.3 and does not replace it. TLS protects the hop; CMDC2
+// protects the conversation. Everything CMDC2 writes is opaque ciphertext to
 // the relay, to Cloudflare, to an ISP, and to anyone who has terminated or
 // broken the TLS session.
 //
@@ -19,6 +19,9 @@
 // What is left is the well-trodden interactive pattern:
 //
 //	SIGMA-I (sign-and-mac authenticated ephemeral DH)  ->  Double Ratchet
+//
+// with the ephemeral DH made HYBRID: X25519 and ML-KEM-768 together, exactly as
+// TLS 1.3 does with its X25519MLKEM768 group.
 //
 // SIGMA is the design underneath IKEv2 and, in its signed-transcript form,
 // underneath TLS 1.3's own authentication. It is equivalent in shape to the
@@ -37,6 +40,7 @@
 //
 //	Identity signatures   Ed25519                        crypto/ed25519
 //	Key agreement         X25519                         crypto/ecdh
+//	Key encapsulation     ML-KEM-768 (FIPS 203)          crypto/mlkem
 //	Hash / transcript     SHA-256                        crypto/sha256
 //	KDF                   HKDF-SHA-256                   golang.org/x/crypto/hkdf
 //	Chain KDF             HMAC-SHA-256                   crypto/hmac
@@ -48,7 +52,7 @@
 // The whole handshake transcript starts from a TLS 1.3 exporter value
 // (RFC 5705 / RFC 8446 §7.5) taken from the underlying connection:
 //
-//	binding = TLS-Exporter("EXPORTER-CMD-Chat-CMDC1-channel-binding", nil, 32)
+//	binding = TLS-Exporter("EXPORTER-CMD-Chat-CMDC2-channel-binding", nil, 32)
 //
 // Both endpoints hash it into th0 and both sign a transcript that contains it.
 // A man-in-the-middle who terminates TLS on both sides necessarily has TWO
@@ -77,10 +81,15 @@
 //
 //	Initiator                                                     Responder
 //	---------                                                     ---------
-//	M1  type=1 | versions[] | e_i (32) | rand_i (32)         ->
-//	                                                <-   M2  type=2 | version | e_r (32) | rand_r (32) | lp(C2)
-//	M3  type=3 | lp(C3)                                      ->
-//	M4  priming record (empty plaintext)                     ->
+//	M1  type=1 | versions[] | e_i(32) | ek(1184) | rand_i(32)  ->
+//	                                       <-  M2  type=2 | version | e_r(32) | ct(1088) | rand_r(32) | lp(C2)
+//	M3  type=3 | lp(C3)                                        ->
+//	M4  priming record (empty plaintext)                       ->
+//
+// ek is an ML-KEM-768 encapsulation key, generated fresh for this handshake; ct
+// is the ciphertext the responder produces by encapsulating against it. The
+// ML-KEM decapsulation key never leaves the initiator, and the secret it
+// protects is created by the responder rather than carried across the network.
 //
 // M1 offers every protocol version this build supports, most preferred first.
 // M2 names the single version chosen. Both the offered list and the choice are
@@ -102,13 +111,24 @@
 //
 // # Handshake key schedule
 //
-//	DH  = X25519(e_i, e_r)      // crypto/ecdh rejects low-order results itself
-//	PRK = HKDF-Extract(SHA-256, salt = th2, ikm = DH)
+//	ss_classical = X25519(e_i, e_r)          // crypto/ecdh rejects low-order results
+//	ss_quantum   = ML-KEM-768 Decap/Encap    // 32 bytes
+//	shared       = ss_quantum || ss_classical
+//	PRK          = HKDF-Extract(SHA-256, salt = th2, ikm = shared)
 //
-//	k_r  = HKDF-Expand(PRK, "CMD-CHAT-E2EE v1 hs responder key",  32)
-//	k_i  = HKDF-Expand(PRK, "CMD-CHAT-E2EE v1 hs initiator key",  32)
-//	m_r  = HKDF-Expand(PRK, "CMD-CHAT-E2EE v1 hs responder mac",  32)
-//	m_i  = HKDF-Expand(PRK, "CMD-CHAT-E2EE v1 hs initiator mac",  32)
+// Concatenate-then-KDF is the standard hybrid combiner, in the same order TLS
+// uses. The result is secure if EITHER component is secure, which is the whole
+// reason to run both: if ML-KEM falls to classical cryptanalysis — a real risk
+// for a young lattice scheme — X25519 still holds the session, and if a quantum
+// computer breaks X25519, ML-KEM still holds it. Neither is trusted alone.
+//
+// Both public values are inside th2, so neither can be swapped without breaking
+// the signatures.
+//
+//	k_r  = HKDF-Expand(PRK, "CMD-CHAT-E2EE v2 hs responder key",  32)
+//	k_i  = HKDF-Expand(PRK, "CMD-CHAT-E2EE v2 hs initiator key",  32)
+//	m_r  = HKDF-Expand(PRK, "CMD-CHAT-E2EE v2 hs responder mac",  32)
+//	m_i  = HKDF-Expand(PRK, "CMD-CHAT-E2EE v2 hs initiator mac",  32)
 //
 // k_r encrypts C2 and k_i encrypts C3. Each of those keys encrypts exactly one
 // ciphertext in the lifetime of the session, so both use the all-zero 96-bit
@@ -244,6 +264,27 @@
 //     check, and the receiving state is left EXACTLY as it was — a failed
 //     decryption must never advance a chain.
 //
+// # Reach of the post-quantum protection
+//
+// The hybrid exchange happens ONCE, at the start of the session. That is enough
+// to protect the whole conversation against an attacker who records traffic now
+// and hopes to decrypt it later, and the reason is the shape of the root chain:
+//
+//	RK_next = HKDF(salt = RK_current, ikm = dh_step)
+//
+// An attacker with a quantum computer could recover every dh_step, because those
+// are X25519. It still cannot compute RK_next, because it never learns RK_0 —
+// and RK_0 came from the hybrid secret. The chain stays out of reach for the
+// whole session on the strength of the initial exchange alone.
+//
+// What is NOT covered: the identity signatures are Ed25519, so a quantum
+// computer could forge one. That only helps an attacker operating LIVE, at the
+// moment of a handshake — it cannot be used retroactively against a conversation
+// that already happened. Post-quantum signatures are much larger and much less
+// settled than ML-KEM, and the honest trade is to take the confidentiality win
+// now and revisit authentication when the standards mature. SECURITY.md says so
+// plainly rather than implying the whole protocol is quantum-safe.
+//
 // # Post-compromise security
 //
 // Two mechanisms, and neither is "TLS already does that":
@@ -292,7 +333,7 @@
 //   - It does not hide metadata. See the metadata table in SECURITY.md.
 //   - It does not protect a compromised endpoint's live plaintext.
 //   - It does not authenticate anything a host says ABOUT a third party. In a
-//     group room each guest has a CMDC1 session with the HOST only; the host is a
+//     group room each guest has a CMDC2 session with the HOST only; the host is a
 //     participant and can read what it relays. That is a property of the star
 //     topology, not a flaw in this package, and it is stated plainly in
 //     SECURITY.md rather than papered over.

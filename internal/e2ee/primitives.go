@@ -12,7 +12,7 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-// This file holds the thin wrappers CMDC1 uses over standard primitives. It
+// This file holds the thin wrappers CMDC2 uses over standard primitives. It
 // implements no cryptography of its own: every function here is a call into
 // crypto/* or golang.org/x/crypto with the arguments spelled out so a reviewer
 // can check them.
@@ -110,7 +110,7 @@ func context(label string, transcript, identityPub []byte, id string) []byte {
 	return lengthPrefix(out, []byte(id))
 }
 
-// padBlock is the granularity CMDC1 pads plaintext to.
+// padBlock is the granularity CMDC2 pads plaintext to.
 //
 // It trades bandwidth for a coarser length signal. A one-character "hi" and a
 // 200-character paragraph produce identically sized records; a 4 KiB message
