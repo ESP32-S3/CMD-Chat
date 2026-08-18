@@ -37,12 +37,11 @@ func TestHostAnnouncesInboundPeer(t *testing.T) {
 	go host.HandleConn(serverSide)
 
 	go func() {
-		conn, dec, err := ClientConn(clientSide, host.Fingerprint, hostIdent.ID, guestIdent.ID, "guestuser", guestIdent)
+		conn, err := ClientConn(clientSide, host.Fingerprint, hostIdent.ID, "guestuser", guestIdent)
 		if err != nil {
 			return
 		}
-		var hello Packet
-		_ = dec.Decode(&hello)
+		_, _ = conn.Receive()
 		// Hang up, so the "peer left" half of the contract is exercised too.
 		_ = conn.Close()
 	}()

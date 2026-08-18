@@ -17,6 +17,7 @@ package phonebook
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -81,6 +82,10 @@ var (
 	ErrOffline = errors.New("phonebook: peer is offline")
 	// ErrNotRegistered is returned by Heartbeat when the registration has lapsed.
 	ErrNotRegistered = errors.New("phonebook: no active registration")
+	// ErrDirectoryMismatch means the directory answered a lookup with an entry
+	// that is not the one that was asked for. It is treated as a hostile
+	// directory, not as a transient fault, and the caller must not connect.
+	ErrDirectoryMismatch = errors.New("phonebook: the directory answered with the wrong peer")
 )
 
 // APIError is a structured failure reported by the Worker.
@@ -332,6 +337,28 @@ func (c *Client) Lookup(ctx context.Context, id string) (*Peer, error) {
 	var peer Peer
 	if err := json.Unmarshal(data, &peer); err != nil {
 		return nil, err
+	}
+
+	// The directory answers with an ID and a public key of its own choosing.
+	// Neither is believed.
+	//
+	// This matters most on FIRST contact, when the trust store has nothing to
+	// compare against: a hostile or compromised directory that answered a
+	// lookup for one ID with a different peer's ID would have the caller pin,
+	// and then authenticate, the wrong identity — and every cryptographic check
+	// downstream would pass, because the caller really would be talking to the
+	// identity it was handed.
+	if peer.ID != id {
+		return nil, fmt.Errorf("%w: asked for %s, the directory answered with %s", ErrDirectoryMismatch, id, peer.ID)
+	}
+	if peer.PublicKey != "" {
+		raw, err := base64.StdEncoding.DecodeString(peer.PublicKey)
+		if err != nil || len(raw) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("%w: the directory returned an unusable public key for %s", ErrDirectoryMismatch, id)
+		}
+		if identity.DeriveID(ed25519.PublicKey(raw)) != id {
+			return nil, fmt.Errorf("%w: the directory returned a public key that does not derive %s", ErrDirectoryMismatch, id)
+		}
 	}
 	return &peer, nil
 }

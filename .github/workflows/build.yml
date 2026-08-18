@@ -129,144 +129,110 @@ jobs:
       - name: Write release notes
         run: |
           cat > notes.md <<'NOTES'
-          ## Group chats, and a name of your own
+          ## Real end-to-end encryption
 
           CMD-Chat is a peer-to-peer terminal chat. Your messages go **straight from your
           computer to your friend's** — there is no company server in the middle holding
           your conversation.
 
-          ### Group chats
+          This release rebuilds the messaging cryptography. Until now, everything rested
+          on a single TLS 1.3 connection. That protected you from someone watching the
+          Wi-Fi, but it left one real gap: an attacker who could terminate TLS on both
+          sides — which is exactly the position the relay and the phonebook sit in — could
+          have forwarded the identity handshake between two connections of its own and sat
+          in the middle of a conversation both people believed was private.
 
-          More than one person can join you now, and everyone in the room sees everyone
-          else. There is nothing to create and no room code: whoever gets connected to is
-          hosting, and **the room is that person's ID**.
+          **That gap is closed, and a second layer of encryption now sits above TLS.**
 
-          - **`/invite`** shows the ID that adds someone. This is the bit that's easy to
-            get wrong — if you joined someone else, the ID to share is *theirs*, not
-            yours, because your own would start a separate chat instead. `/invite` says
-            which is which.
-          - **`/who`** lists the room, and you'll see `* Jordan joined - 3 here` as people
-            come and go.
-          - **`/group off`** turns a room back into a one-to-one chat if you're hosting.
-            Anyone already there stays; the next person to try is told why instead of
-            being dropped in silence. The setting is remembered.
+          ### CMDC1, the new end-to-end layer
 
-          **A note on trust, because it changes with rooms.** A two-person chat has no
-          trusted middle — each side authenticates the other end to end. In a room, guests
-          reach each other *through* the host. Nobody can impersonate anyone: every relayed
-          message is labelled with the identity that connection actually proved, not with
-          whatever the message claimed. But a dishonest host could forge or drop a message
-          from another member. **Host rooms with people you'd trust to carry your
-          messages.** The relay and phonebook are unaffected and still cannot read
-          anything.
+          Every message is now encrypted a second time, inside the TLS session, with keys
+          only your two computers ever hold. The relay, the phonebook, Cloudflare and your
+          ISP see nothing but ciphertext.
 
-          ### Pick a nickname
+          - **A modern authenticated handshake** — mutually authenticated ephemeral X25519,
+            signed with the Ed25519 identity you already have. The same pattern used by
+            IKEv2 and by TLS 1.3 itself.
+          - **Tied to the exact connection it runs on.** This is what closes the gap above.
+            An attacker in the middle holds two different TLS sessions, so the signatures
+            it forwards don't verify, and the connection is refused instead of quietly
+            succeeding.
+          - **A Double Ratchet**, the published algorithm used by Signal, unmodified. Every
+            single message gets its own key and its own nonce.
+          - **Forward secrecy.** Your identity key signs; it never encrypts. If someone
+            steals it a year from now, they still cannot read anything they recorded today.
+          - **Recovery after a compromise.** Fresh key material is mixed in every time your
+            friend replies, and an idle chat asks for it, so an attacker who briefly got
+            into a device loses access again once they're out.
+          - **Replays and tampering are rejected.** A message key is destroyed the moment
+            it is used, so no captured message can ever be delivered twice. Reordered and
+            lost messages still work; modified ones are refused without disturbing the
+            conversation.
 
-          **`/nick Alex`** and everyone sees *Alex* beside your messages instead of your
-          computer's account name.
+          ### Checking who you're actually talking to
 
-          Your nickname is stored **on your own computer only**. It is not in the
-          phonebook, not in any database, and **nobody can look it up from your ID** — it
-          reaches only the people you're actually chatting with, inside the encrypted
-          connection. `/nick` on its own puts it back.
+          - **`/verify`** shows a **safety number** — a short code derived from both of
+            your identity keys. Read it to each other on a call. If it matches, nobody is
+            between you. CMD-Chat shows it automatically the first time you connect to
+            someone and says plainly that it *is* the first time.
+          - **A changed identity key stops the connection.** If an ID you've talked to
+            before turns up with a different key, CMD-Chat refuses and explains why. There
+            is no "accept anyway" button, because an attacker could arrange for you to see
+            one. If your friend genuinely reinstalled, `cmd-chat forget <their-id>` is a
+            deliberate step you take after checking with them some other way.
+          - **The directory can no longer point you at the wrong person.** A phonebook
+            answer for a different ID, or a LAN reply from a machine claiming someone
+            else's ID, is now discarded. The ID CMD-Chat requires is always the one *you*
+            typed.
+
+          ### Your identity key is now protected on disk
+
+          - **On Windows**, your private key is sealed by the operating system to your user
+            account. Copying `identity.json` to another machine gets an attacker nothing.
+          - **On any platform**, set `CMD_CHAT_IDENTITY_PASSPHRASE` to encrypt it with a
+            passphrase (scrypt + XChaCha20-Poly1305). This is the strongest option.
+          - **`cmd-chat security`** tells you which protection is actually in use, rather
+            than leaving you to guess.
+          - **Message text is never written to the debug log.** It used to be.
+
+          ### Being straight with you about the limits
+
+          There is a new **[SECURITY.md](https://github.com/ESP32-S3/CMD-Chat/blob/main/SECURITY.md)**
+          with the full threat model, the exact key schedule, and a list of what is *not*
+          protected. The short version:
+
+          - **Encryption does not hide metadata.** The phonebook sees who is online and who
+            looks up whom; the relay sees two IDs, two IP addresses, and message sizes and
+            timing.
+          - **Group rooms are not group end-to-end encryption.** A room is a set of
+            two-person encrypted links around a human host, so **the host can read what it
+            passes between guests**. Host rooms with people you'd trust to carry your
+            messages.
+          - **No post-quantum protection yet.**
+          - **This code has not been independently audited.** It is not unbreakable and not
+            "100% secure", and this release does not claim to be.
+
+          ### Compatibility
+
+          The protocol changed, so **both people need this version**. An older build cannot
+          connect, and it fails with a clear message rather than falling back to something
+          weaker. Your ID and your existing contacts carry over unchanged.
 
           ### Also in this release
 
-          - **Update notices on launch.** CMD-Chat asks GitHub whether a newer release
-            exists and tells you once if one does:
-
-            ```
-            A newer CMD-Chat is available: v2.1.6 (you have v2.1.5).
-            Download it from https://github.com/ESP32-S3/CMD-Chat/releases/tag/v2.1.6
-            You can keep chatting on this version; updating is optional.
-            ```
-
-            It **never installs anything** — no self-update, no elevation, no writing over
-            the running program. It prints a link and gets out of the way.
-
-            It **sends nothing about you**: one anonymous request asking what the newest
-            version is. No ID, no identity, no telemetry.
-
-            It **never delays launch**. The check runs in the background and the notice
-            appears when it arrives. If GitHub is unreachable, CMD-Chat says nothing.
-
-            Turn it off with `CMD_CHAT_NO_UPDATE_CHECK=1`.
-
-          - **`cmd-chat version`**, and the version now shows in the header.
+          - `/verify`, `cmd-chat forget`, and `cmd-chat security`.
+          - Message lengths are padded, so a short message and a long one look the same
+            size on the wire.
+          - Over a hundred new tests, including adversarial ones that run a real
+            man-in-the-middle holding both TLS sessions and confirm it gets nothing.
 
           ### Carried over from v2.1.4
 
-          - **"Start a chat" no longer closes the terminal.** Picking it from the menu
-            crashed the program before it opened a single socket, and the launcher window
-            disappeared with the reason still in it. Debug mode happened to avoid the
-            crash, which is why the problem seemed to vanish there and leave only the
-            Windows firewall prompt behind.
-          - **The firewall prompt is explained instead of ignored.** If Windows blocks the
-            chat port — or you click Cancel on "blocked some features of this app" —
-            CMD-Chat now says so, tells you how to allow it, and keeps working over the
-            encrypted relay rather than looking connectable when it isn't.
-          - **The window stays open when something goes wrong.** Launchers now hold the
-            terminal on an unexpected exit and show the reason, on every platform.
-          - **The macOS and Linux launchers find the program again.** They looked for a
-            file name the release ZIP does not contain.
-          - Leaving a chat with `/quit` returns you to the prompt instead of closing
-            CMD-Chat, and a chat that the other side closes no longer leaves you typing
-            into a dead connection.
-
-          - **No more "one person starts, the other joins."** Every open copy of CMD-Chat
-            is already reachable. Both of you just open it, swap IDs, and **whoever pastes
-            the other's ID first** connects — the other side does nothing and the chat
-            simply opens in front of them.
-          - **Nothing to agree on in advance**, and nothing to redo between conversations:
-            after `/quit` you are still reachable.
-          - `?`, `/id`, `/debug` and `/quit` at the prompt; the old menu numbers still
-            answer and point you at the new flow.
-          - `cmd-chat host` and `cmd-chat join` are unchanged for scripts.
-
-          ### Still true from v2.0.x
-
-          - **Chat with people outside your Wi-Fi**, with no router or port-forwarding
-            setup.
-          - **It picks the best connection automatically** — your local network first, then
-            a direct internet connection, and only if neither works, an encrypted relay.
-            You'll see which one it used.
-          - **Works on strict networks**, including mobile hotspots and CGNAT.
-
-          ### How it stays private
-
-          Two small Cloudflare services make this possible, and neither can read your chat:
-
-          - A **phonebook** (Cloudflare Worker + D1 database) that answers one question:
-            *where can I reach this ID right now?* It stores your ID, your public key and a
-            short-lived address that expires five minutes after you stop hosting. **It never
-            stores or forwards a single chat message.**
-          - A **relay**, used only when a direct connection is impossible. It forwards
-            already-encrypted traffic between two peers and **holds none of the keys needed
-            to read it**. It stores nothing.
-
-          Your messages stay end-to-end encrypted (TLS 1.3) with Ed25519 identities on both
-          ends, on every path — local, direct or relayed. Your private key never leaves
-          your device.
-
-          ### Getting started
-
-          1. Download the file for your system below.
-          2. Extract the zip.
-          3. Double-click the launcher inside (`Start CMD-Chat.bat` on Windows).
-          4. On Windows, click **Allow access** when the firewall asks.
-          5. Send your friend the ID it shows. When they have CMD-Chat open too, paste
-             their ID at the prompt — or let them paste yours.
-
-          See `QUICKSTART.md` inside the download for more.
-
-          ### Known limitations
-
-          A direct connection can still fail on very restrictive networks; when it does,
-          CMD-Chat falls back to the relay automatically.
-
-          Windows still shows its firewall prompt the first time you open CMD-Chat.
-          Suppressing it would need an administrator-level firewall rule, so CMD-Chat
-          explains it instead and works either way.
+          - Group chats, `/invite`, `/who`, `/group off`, and `/nick`.
+          - Update notices on launch, which send nothing about you and never install
+            anything. Turn them off with `CMD_CHAT_NO_UPDATE_CHECK=1`.
+          - "Start a chat" no longer closes the terminal, and a blocked Windows firewall
+            port is explained instead of silently breaking connectivity.
           NOTES
       - name: Publish GitHub release
         # The single place a release is created. A second workflow used to publish

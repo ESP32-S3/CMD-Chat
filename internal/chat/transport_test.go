@@ -95,15 +95,15 @@ func TestChatOverArbitraryTransportIsOpaque(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		conn, dec, err := ClientConn(tap, host.Fingerprint, hostIdent.ID, guestIdent.ID, "guestuser", guestIdent)
+		conn, err := ClientConn(tap, host.Fingerprint, hostIdent.ID, "guestuser", guestIdent)
 		if err != nil {
 			done <- err
 			return
 		}
 		defer conn.Close()
 
-		var hello Packet
-		if err := dec.Decode(&hello); err != nil {
+		hello, err := conn.Receive()
+		if err != nil {
 			done <- err
 			return
 		}
@@ -118,8 +118,8 @@ func TestChatOverArbitraryTransportIsOpaque(t *testing.T) {
 		// hold more than two people, so read past anything that is not a message
 		// rather than assuming the next packet is the one under test.
 		for range 16 {
-			var msg Packet
-			if err := dec.Decode(&msg); err != nil {
+			msg, err := conn.Receive()
+			if err != nil {
 				done <- err
 				return
 			}
@@ -193,7 +193,7 @@ func TestClientConnRejectsFingerprintMismatch(t *testing.T) {
 	go host.HandleConn(serverSide)
 
 	wrong := strings.Repeat("ab", 32)
-	_, _, err = ClientConn(clientSide, wrong, hostIdent.ID, guestIdent.ID, "guestuser", guestIdent)
+	_, err = ClientConn(clientSide, wrong, hostIdent.ID, "guestuser", guestIdent)
 	if err == nil {
 		t.Fatal("expected the handshake to fail on a fingerprint mismatch")
 	}
@@ -218,7 +218,7 @@ func TestClientConnRejectsWrongHostIdentity(t *testing.T) {
 	serverSide, clientSide := net.Pipe()
 	go host.HandleConn(serverSide)
 
-	_, _, err = ClientConn(clientSide, host.Fingerprint, impostor.ID, guestIdent.ID, "guestuser", guestIdent)
+	_, err = ClientConn(clientSide, host.Fingerprint, impostor.ID, "guestuser", guestIdent)
 	if err == nil {
 		t.Fatal("expected the handshake to fail when the host is not who we asked for")
 	}

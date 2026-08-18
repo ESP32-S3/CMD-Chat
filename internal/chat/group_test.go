@@ -1,7 +1,6 @@
 package chat
 
 import (
-	"encoding/json"
 	"net"
 	"testing"
 	"time"
@@ -15,7 +14,7 @@ import (
 // that only reads when the test asks would wedge the host's broadcast and turn
 // every group test into a timeout.
 type guest struct {
-	conn    net.Conn
+	conn    *Conn
 	packets chan Packet
 }
 
@@ -27,14 +26,13 @@ func connectGuest(t *testing.T, host *Host, hostID string, ident *identity.Ident
 	go host.HandleConn(serverSide)
 
 	type result struct {
-		conn net.Conn
-		dec  *json.Decoder
+		conn *Conn
 		err  error
 	}
 	done := make(chan result, 1)
 	go func() {
-		conn, dec, err := ClientConn(clientSide, host.Fingerprint, hostID, ident.ID, nickname, ident)
-		done <- result{conn: conn, dec: dec, err: err}
+		conn, err := ClientConn(clientSide, host.Fingerprint, hostID, nickname, ident)
+		done <- result{conn: conn, err: err}
 	}()
 
 	var r result
@@ -51,8 +49,8 @@ func connectGuest(t *testing.T, host *Host, hostID string, ident *identity.Ident
 	t.Cleanup(func() { _ = g.conn.Close() })
 	go func() {
 		for {
-			var p Packet
-			if err := r.dec.Decode(&p); err != nil {
+			p, err := g.conn.Receive()
+			if err != nil {
 				close(g.packets)
 				return
 			}
@@ -144,7 +142,7 @@ func TestGroupChatRelaysBetweenGuests(t *testing.T) {
 	}
 
 	// C speaks; B hears it, attributed to C.
-	if err := Send(c.conn, Packet{Type: "msg", Text: "hi from jordan"}); err != nil {
+	if err := c.conn.Send(Packet{Type: "msg", Text: "hi from jordan"}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	got := b.nextOfType(t, "msg")
@@ -214,7 +212,7 @@ func TestHostRelabelsMessagesWithTheAuthenticatedIdentity(t *testing.T) {
 
 	// The attacker claims to be the victim, by ID and by nickname.
 	forged := Packet{Type: "msg", From: victimIdent.ID, Name: "victim", Text: "I never said this"}
-	if err := Send(attacker.conn, forged); err != nil {
+	if err := attacker.conn.Send(forged); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 

@@ -18,10 +18,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ESP32-S3/CMD-Chat/internal/auth"
 	"github.com/ESP32-S3/CMD-Chat/internal/chat"
 	"github.com/ESP32-S3/CMD-Chat/internal/connect"
 	"github.com/ESP32-S3/CMD-Chat/internal/debug"
 	"github.com/ESP32-S3/CMD-Chat/internal/discovery"
+	"github.com/ESP32-S3/CMD-Chat/internal/e2ee"
 	"github.com/ESP32-S3/CMD-Chat/internal/identity"
 	"github.com/ESP32-S3/CMD-Chat/internal/ipc"
 	"github.com/ESP32-S3/CMD-Chat/internal/network"
@@ -70,6 +72,12 @@ func main() {
 			return
 		case "join":
 			join(id, argsAfter(2))
+			return
+		case "forget":
+			forget(argsAfter(2))
+			return
+		case "security":
+			securityReport(id)
 			return
 		case "help", "--help", "-h":
 			usage()
@@ -627,6 +635,7 @@ func readyHelp(st *station) {
 	fmt.Println("  /nick NAME     set the name others see (stored on this computer only)")
 	fmt.Println("  /group on|off  allow more than one person into chats you host")
 	fmt.Println("  /who           list who is in the room")
+	fmt.Println("  /verify        show the safety number to compare with the other person")
 	fmt.Println("  /invite        show the ID that invites someone into this room")
 	fmt.Println("  /debug         open a debug terminal and record a crash log")
 	fmt.Println("  /quit          close CMD-Chat (also leaves a chat)")
@@ -652,6 +661,7 @@ func readyHelp(st *station) {
 func hostChat(st *station, first chat.Peer, lines <-chan string) {
 	drain(st.left)
 	fmt.Printf("%s connected to you.\n", peerLabel(first))
+	announceVerification(peerLabel(first), first.SafetyNumber, first.FirstContact)
 	if st.host.Group() {
 		fmt.Println("Others can join with /invite. /who lists the room. /quit ends it.")
 	} else {
@@ -677,6 +687,9 @@ func hostChat(st *station, first chat.Peer, lines <-chan string) {
 			case "/who", "/room":
 				showRoom(st.host.Members(), st.id.ID)
 				continue
+			case "/verify", "/safety":
+				showVerification(peerLabel(first), first.SafetyNumber)
+				continue
 			case "/invite":
 				showInvite(st.id.ID, st.id.ID, true)
 				continue
@@ -690,11 +703,15 @@ func hostChat(st *station, first chat.Peer, lines <-chan string) {
 			if text == "" {
 				continue
 			}
-			debug.Log("Host message sent: %q", text)
+			// Message text is deliberately never logged. See
+			// docs/SECURITY-BASELINE.md, weakness W4: the debug log is a
+			// world-readable file, and this used to write every outgoing
+			// message into it in the clear.
 			st.host.Broadcast(chat.Packet{Type: "msg", From: st.id.ID, Name: name(), Text: text})
 			fmt.Printf("\r[%s] %s\n", name(), text)
 		case p := <-st.peers:
 			fmt.Printf("\r* %s joined - %d here\n", peerLabel(p), st.host.Count())
+			announceVerification(peerLabel(p), p.SafetyNumber, p.FirstContact)
 		case p := <-st.left:
 			remaining := st.host.Count() - 1
 			if remaining <= 0 {
@@ -704,6 +721,94 @@ func hostChat(st *station, first chat.Peer, lines <-chan string) {
 			fmt.Printf("\r* %s left - %d here\n", peerLabel(p), st.host.Count())
 		}
 	}
+}
+
+// announceVerification prints the safety number, and says plainly whether this
+// is a peer we have talked to before.
+//
+// This is the one part of CMD-Chat's security that a user has to participate in.
+// Everything else is checked by the software: the peer proves its identity key,
+// the ID is a hash of that key, and a key that changes later fails the
+// connection outright. What none of that can establish is whether the ID you
+// were GIVEN was really your friend's — if it reached you through something the
+// attacker controls, you are talking to exactly the identity you were handed.
+//
+// Comparing the safety number over a call, or in person, is what closes that.
+func announceVerification(label, safetyNumber string, firstContact bool) {
+	if safetyNumber == "" {
+		return
+	}
+	fmt.Println()
+	if firstContact {
+		fmt.Printf("This is the first time you have connected to %s.\n", label)
+		fmt.Println("From now on CMD-Chat will refuse the connection if their identity key changes.")
+		fmt.Println("To be sure nobody is in the middle right now, check that you both see:")
+	} else {
+		fmt.Printf("You have connected to %s before, and their identity key is unchanged.\n", label)
+		fmt.Println("Safety number:")
+	}
+	fmt.Println()
+	fmt.Printf("    %s\n", safetyNumber)
+	fmt.Println()
+	if firstContact {
+		fmt.Println("Read it to each other on a call, or compare screens. If it matches, nobody")
+		fmt.Println("is between you. If it does not, stop and work out why. Type /verify to see")
+		fmt.Println("it again at any time.")
+		fmt.Println()
+	}
+}
+
+// showVerification prints the safety number on demand, for /verify.
+func showVerification(label, safetyNumber string) {
+	fmt.Println()
+	if safetyNumber == "" {
+		fmt.Println("There is no active chat to verify.")
+		fmt.Println()
+		return
+	}
+	fmt.Printf("Safety number with %s:\n", label)
+	fmt.Println()
+	fmt.Printf("    %s\n", safetyNumber)
+	fmt.Println()
+	fmt.Println("Both of you should see exactly this. Compare it on a call or in person.")
+	fmt.Println("It stays the same for this pair of people, and changes only if one of")
+	fmt.Println("your identity keys changes.")
+	fmt.Println()
+}
+
+// reportHandshakeFailure explains a refused connection.
+//
+// A changed identity key is singled out because it is the one failure a user
+// must NOT be encouraged to retry past: it is either a friend who reinstalled,
+// or somebody substituting their own key, and the software cannot tell which.
+func reportHandshakeFailure(err error) {
+	text := err.Error()
+	fmt.Println()
+	switch {
+	case strings.Contains(text, "different identity key"):
+		fmt.Println("Refusing to connect: that ID is using a different identity key than before.")
+		fmt.Println()
+		fmt.Println("Either they reinstalled CMD-Chat and lost their old identity, or somebody")
+		fmt.Println("is trying to impersonate them. CMD-Chat cannot tell those apart, so it")
+		fmt.Println("stops here rather than guessing.")
+		fmt.Println()
+		fmt.Println("Check with them by some other means - a call, in person, anything that is")
+		fmt.Println("not this chat. If they really did reinstall, run:")
+		fmt.Println()
+		fmt.Println("    cmd-chat forget <their-id>")
+		fmt.Println()
+		fmt.Println("and connect again. You will be asked to compare a new safety number.")
+	case strings.Contains(text, "fingerprint mismatch"):
+		fmt.Println("Refusing to connect: the host's certificate is not the one that was published.")
+		fmt.Println("Something is intercepting the connection, or the host restarted mid-lookup.")
+		fmt.Println("Try again; if it keeps happening, do not proceed.")
+	case strings.Contains(text, "identity mismatch"):
+		fmt.Println("Refusing to connect: the peer that answered is not the ID you asked for.")
+		fmt.Println("Do not proceed. Check the ID with your friend directly.")
+	default:
+		fmt.Printf("Connection failed: %v\n", err)
+	}
+	fmt.Println()
 }
 
 // peerLabel names a peer by nickname when it sent one, and by ID otherwise.
@@ -820,6 +925,80 @@ func debugChild() {
 	ready(id)
 }
 
+// forget removes a remembered identity key, which is the only way past a
+// key-change refusal.
+//
+// It is a separate, deliberate command precisely so that nothing on the network
+// can trigger it. A prompt inside the failing connection would be a prompt an
+// attacker had arranged.
+func forget(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: cmd-chat forget <cmd-chat-id>")
+		fmt.Println()
+		fmt.Println("This makes CMD-Chat forget the identity key it remembers for that ID, so")
+		fmt.Println("the next connection is treated as a first contact. Only do this after you")
+		fmt.Println("have confirmed with the person, by some means other than this chat, that")
+		fmt.Println("they really did change devices or reinstall.")
+		return
+	}
+	target := strings.TrimSpace(args[0])
+	if !phonebook.ValidID(target) {
+		fmt.Println("That does not look like a CMD-Chat ID.")
+		return
+	}
+	store := auth.Load()
+	record, known := store.Known(target)
+	if !known {
+		fmt.Printf("Nothing is remembered for %s.\n", target)
+		return
+	}
+	if err := store.Forget(target); err != nil {
+		fmt.Printf("Could not forget it: %v\n", err)
+		return
+	}
+	fmt.Printf("Forgot the identity key for %s.\n", target)
+	if !record.FirstSeen.IsZero() {
+		fmt.Printf("It had been trusted since %s.\n", record.FirstSeen.Format("2 January 2006"))
+	}
+	fmt.Println("The next connection will be treated as a first contact. Compare the new")
+	fmt.Println("safety number with them before you say anything sensitive.")
+}
+
+// securityReport prints what is actually protecting this installation.
+func securityReport(id *identity.Identity) {
+	fmt.Println("CMD-Chat security status")
+	fmt.Println()
+	fmt.Printf("  Your ID              %s\n", id.ID)
+	fmt.Printf("  Message encryption   %s (end to end, above TLS 1.3)\n", e2ee.ProtocolVersionName)
+	fmt.Println("  Transport            TLS 1.3, certificate pinned where published")
+
+	protection, err := identity.StoredProtection()
+	switch {
+	case err != nil:
+		fmt.Printf("  Private key at rest  unknown (%v)\n", err)
+	case protection == identity.ProtectionPassphrase:
+		fmt.Println("  Private key at rest  encrypted with your passphrase (scrypt + XChaCha20-Poly1305)")
+	case protection == identity.ProtectionDPAPI:
+		fmt.Println("  Private key at rest  sealed by Windows to this user account (DPAPI)")
+	default:
+		fmt.Println("  Private key at rest  FILE PERMISSIONS ONLY")
+		fmt.Printf("                       Set %s to encrypt it.\n", identity.PassphraseEnv)
+	}
+
+	store := auth.Load()
+	if _, known := store.Known(id.ID); known {
+		_ = known
+	}
+	fmt.Println()
+	fmt.Println("What this does not protect:")
+	fmt.Println("  - who you talk to, when, and roughly how much: the relay and the")
+	fmt.Println("    phonebook see that, and encryption does not hide it")
+	fmt.Println("  - anything on a device somebody else controls")
+	fmt.Println()
+	fmt.Println("See SECURITY.md in the repository for the full threat model.")
+	fmt.Println("This code has not been independently audited.")
+}
+
 func usage() {
 	fmt.Println("CMD-Chat - lightweight cross-platform terminal P2P chat")
 	fmt.Println("Usage:")
@@ -829,6 +1008,8 @@ func usage() {
 	fmt.Println("  cmd-chat endpoint")
 	fmt.Println("  cmd-chat host [--port 38556] [--publish=false] [--relay=false] [--group=false]")
 	fmt.Println("  cmd-chat join <persistent-id>        # LAN, then direct, then relay")
+	fmt.Println("  cmd-chat forget <persistent-id>      # forget a remembered identity key")
+	fmt.Println("  cmd-chat security                    # what is protecting this install")
 	fmt.Println("  cmd-chat join --address host:port --fingerprint SHA256...")
 	fmt.Println()
 	fmt.Println("Opening CMD-Chat with no arguments already makes you reachable, so two")
@@ -912,6 +1093,7 @@ func host(id *identity.Identity, args []string) {
 	}
 	fmt.Println("IPC bridge: ", ipcAddress)
 	fmt.Println("Waiting for someone to connect. Type messages below; /quit exits.")
+	fmt.Println("When someone joins, compare the safety number with them out of band.")
 	for {
 		fmt.Print("> ")
 		select {
@@ -926,11 +1108,12 @@ func host(id *identity.Identity, args []string) {
 			if text == "" {
 				continue
 			}
-			debug.Log("Host message sent: %q", text)
+			// Never logged; see the note in hostChat.
 			st.host.Broadcast(chat.Packet{Type: "msg", From: id.ID, Name: name(), Text: text})
 			fmt.Printf("\r[%s] %s\n", name(), text)
 		case p := <-st.peers:
 			fmt.Printf("\r%s connected to you.\n", peerLabel(p))
+			announceVerification(peerLabel(p), p.SafetyNumber, p.FirstContact)
 		case p := <-st.left:
 			fmt.Printf("\r%s left the chat.\n", peerLabel(p))
 		case release, ok := <-updates:
@@ -1067,12 +1250,12 @@ func join(id *identity.Identity, args []string) {
 	chatSession(id, result.Conn, result.Fingerprint, result.HostID, lines)
 }
 
-// chatSession runs the TLS and identity handshake over an already-established
-// transport, then the interactive loop. The transport may be LAN, direct or
-// relayed; authentication is identical in every case.
+// chatSession runs the TLS handshake, the CMDC1 end-to-end handshake and then
+// the interactive loop. The transport may be LAN, direct or relayed;
+// authentication and encryption are identical in every case.
 func chatSession(id *identity.Identity, transport net.Conn, fingerprint, expectedHostID string, lines <-chan string) {
 	debug.Log("Starting chat session; expectedHostID=%q pinned=%t", expectedHostID, fingerprint != "")
-	c, dec, err := chat.ClientConn(transport, fingerprint, expectedHostID, id.ID, name(), id)
+	c, err := chat.ClientConn(transport, fingerprint, expectedHostID, name(), id)
 	if err != nil {
 		debug.Log("Handshake failed: %v", err)
 		fmt.Printf("Connection failed: %v\n", err)
@@ -1081,8 +1264,8 @@ func chatSession(id *identity.Identity, transport net.Conn, fingerprint, expecte
 	}
 	defer c.Close()
 
-	var hello chat.Packet
-	if err := dec.Decode(&hello); err != nil {
+	hello, err := c.Receive()
+	if err != nil {
 		debug.Log("Handshake decode failed: %v", err)
 		fmt.Printf("Connection failed during handshake: %v\n", err)
 		return
@@ -1091,7 +1274,9 @@ func chatSession(id *identity.Identity, transport net.Conn, fingerprint, expecte
 	// Turning that into "invalid host handshake" would report the one case with
 	// a perfectly good explanation as a protocol fault.
 	if hello.Type == "error" {
-		debug.Log("Host refused the connection: %s", hello.Text)
+		// The reason is shown to the user but not written to the log: it is
+		// text the peer chose, and the log is a file that gets shared.
+		debug.Log("Host refused the connection")
 		reason := strings.TrimSpace(hello.Text)
 		if reason == "" {
 			reason = "the host refused the connection"
@@ -1110,6 +1295,7 @@ func chatSession(id *identity.Identity, transport net.Conn, fingerprint, expecte
 		hostLabel = chat.ShortID(hello.From)
 	}
 	fmt.Printf("Authenticated host %s (%s).\n", hostLabel, hello.From)
+	announceVerification(hostLabel, c.SafetyNumber(), c.FirstContact())
 
 	// roomID is the host's ID. That, and never this guest's own ID, is what
 	// invites another person into this room.
@@ -1144,13 +1330,13 @@ func chatSession(id *identity.Identity, transport net.Conn, fingerprint, expecte
 	go func() {
 		defer debug.Contain("chat read loop")
 		defer close(closed)
-		chat.ReadLoop(dec, func(p chat.Packet) {
+		chat.ReadLoop(c, func(p chat.Packet) {
 			switch p.Type {
 			case "msg", "roster", "system", "error":
 			default:
 				return
 			}
-			debug.Log("Packet %q received from %s", p.Type, p.From)
+			debug.Log("Packet type %q received", p.Type)
 			select {
 			case incoming <- p:
 			case <-leaving:
@@ -1181,12 +1367,15 @@ func chatSession(id *identity.Identity, transport net.Conn, fingerprint, expecte
 			case "/who", "/room":
 				showRoom(members, roomID)
 				continue
+			case "/verify", "/safety":
+				showVerification(hostLabel, c.SafetyNumber())
+				continue
 			case "/invite":
 				showInvite(roomID, id.ID, false)
 				continue
 			case "/nick", "/name":
 				setNickname(argument, func(n string) {
-					if err := chat.Rename(c, n); err != nil {
+					if err := c.Rename(n); err != nil {
 						debug.Log("Rename failed: %v", err)
 					}
 				})
@@ -1199,7 +1388,7 @@ func chatSession(id *identity.Identity, transport net.Conn, fingerprint, expecte
 			if text == "" {
 				continue
 			}
-			if err := chat.Send(c, chat.Packet{Type: "msg", From: id.ID, Name: name(), Text: text}); err != nil {
+			if err := c.Send(chat.Packet{Type: "msg", From: id.ID, Name: name(), Text: text}); err != nil {
 				debug.Log("Send failed: %v", err)
 				fmt.Printf("Send failed: %v\n", err)
 				return

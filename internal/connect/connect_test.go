@@ -141,7 +141,9 @@ func peerResponse(w http.ResponseWriter, id string, version int, endpoints []str
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok": true, "id": id, "online": true,
-		"public_key":          "TEOZNabz0XpNzrl9Bhxexshebq/6hVlYT7GnWecAJLE=",
+		// Omitted on purpose: these fixtures address reachability, not identity,
+		// and the directory client refuses a public key that does not derive the
+		// ID it accompanies. internal/phonebook covers that check directly.
 		"session_fingerprint": strings.Repeat("a", 64),
 		"protocol_version":    version,
 		"candidates":          candidates,
@@ -279,5 +281,66 @@ func TestLogLinesDoNotContainRawAddresses(t *testing.T) {
 		if strings.Contains(line, host) {
 			t.Fatalf("progress line leaked an address: %q", line)
 		}
+	}
+}
+
+// The identity that gets pinned must be the one the USER typed, never one the
+// network supplied.
+//
+// This is what makes a first connection safe. A CMD-Chat ID is a hash of a
+// public key, so typing a friend's ID already commits to their exact key — but
+// only if that typed value is what the handshake goes on to require. If the
+// pinned ID came from the directory's answer instead, a hostile directory could
+// substitute its own peer, and on a first contact there would be nothing in the
+// trust store to catch it: the caller really would be talking to the identity it
+// was handed.
+func TestJoinPinsTheIDTheCallerAskedFor(t *testing.T) {
+	live := listener(t)
+	target := testIdentity(t).ID
+
+	// The directory answers correctly here; the point is what Join carries
+	// forward, not whether the directory misbehaved.
+	url := fakePhonebook(t, func(w http.ResponseWriter, r *http.Request) {
+		peerResponse(w, target, RelayProtocolVersion, []string{live.Addr().String()})
+	})
+
+	result, err := Join(target, Options{
+		Identity:     testIdentity(t),
+		PhonebookURL: url,
+		RelayURL:     "http://127.0.0.1:1",
+		LANTimeout:   50 * time.Millisecond,
+		Force:        PathDirect,
+	})
+	if err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+	defer result.Conn.Close()
+
+	if result.HostID != target {
+		t.Fatalf("HostID = %q, want the caller's target %q", result.HostID, target)
+	}
+}
+
+// A directory that answers with a different peer must abort the whole strategy,
+// not fall through to the relay with a substituted identity.
+func TestJoinAbortsWhenTheDirectoryAnswersWithADifferentPeer(t *testing.T) {
+	wanted := testIdentity(t).ID
+	substituted := testIdentity(t).ID
+
+	url := fakePhonebook(t, func(w http.ResponseWriter, r *http.Request) {
+		peerResponse(w, substituted, RelayProtocolVersion, []string{"127.0.0.1:1"})
+	})
+
+	_, err := Join(wanted, Options{
+		Identity:     testIdentity(t),
+		PhonebookURL: url,
+		RelayURL:     "http://127.0.0.1:1",
+		LANTimeout:   50 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("Join accepted a directory answer for a different peer")
+	}
+	if !errors.Is(err, phonebook.ErrDirectoryMismatch) {
+		t.Fatalf("got %v, want ErrDirectoryMismatch", err)
 	}
 }

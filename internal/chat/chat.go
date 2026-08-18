@@ -1,7 +1,35 @@
+// Package chat is the CMD-Chat conversation layer.
+//
+// # Two layers of encryption, and what each one is for
+//
+// Every connection carries TWO independent layers, and they defend against
+// different attackers:
+//
+//	TLS 1.3        protects the hop. It stops a passive observer on the Wi-Fi,
+//	               and it is what the relay's WebSocket carries.
+//	CMDC1 (e2ee)   protects the conversation. It runs INSIDE the TLS session and
+//	               is keyed only by the two endpoints' Ed25519 identities and
+//	               fresh ephemeral X25519 keys.
+//
+// The second layer is the one that matters against the relay, against
+// Cloudflare, against the D1 phonebook and against anyone who has terminated
+// TLS. The CMDC1 handshake is bound to the TLS session it runs in — see
+// e2ee.TLSChannelBinding — so a man in the middle cannot forward it between two
+// TLS sessions of its own.
+//
+// # Rooms are a star, and the host is a participant
+//
+// A room is N two-party CMDC1 sessions around one host. Guest-to-guest messages
+// are decrypted by the host and re-encrypted to each recipient, because the host
+// is a person in the conversation, not a server. A guest authenticates the HOST
+// and nobody else, and the roster is the host's account of the room. This is
+// stated plainly in SECURITY.md rather than dressed up as group E2EE.
 package chat
 
 import (
 	"bufio"
+	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -22,18 +50,27 @@ import (
 
 	"github.com/ESP32-S3/CMD-Chat/internal/auth"
 	"github.com/ESP32-S3/CMD-Chat/internal/debug"
+	"github.com/ESP32-S3/CMD-Chat/internal/e2ee"
 	"github.com/ESP32-S3/CMD-Chat/internal/identity"
 	"github.com/ESP32-S3/CMD-Chat/internal/profile"
 )
 
+// MaxMessageBytes caps one message's text.
 const MaxMessageBytes = 4096
 
-// Packet is one message on the wire.
+// HandshakeTimeout bounds TLS plus CMDC1. A peer that stalls mid-handshake ties
+// up a goroutine and, on the relay, a session slot.
+const HandshakeTimeout = 30 * time.Second
+
+// Packet is one message inside the encrypted channel.
 //
 // Types: "msg" from a participant, "hello" from the host at handshake time,
-// "roster" listing the room, "system" for join and leave notices, and "error".
-// A client that does not understand a type ignores it, which is what lets an
-// older build sit in a group chat without seeing the roster.
+// "roster" listing the room, "system" for join and leave notices, "nick" for a
+// rename, "error", and the "rekey"/"rekey_ack" pair that keeps the ratchet
+// turning. An unrecognised type is ignored.
+//
+// Every one of these travels as CMDC1 ciphertext. Nothing in this struct is ever
+// written to a socket in the clear.
 type Packet struct {
 	Type string `json:"type"`
 	From string `json:"from,omitempty"`
@@ -50,11 +87,17 @@ type Packet struct {
 
 // Peer identifies the other side of a completed handshake.
 //
-// ID is proven by the Ed25519 handshake. Name is a self-chosen nickname that is
-// not proven by anything and must never be used to decide who someone is.
+// ID is proven by the CMDC1 handshake. Name is a self-chosen nickname that
+// proves nothing and must never be used to decide who someone is.
 type Peer struct {
 	ID   string
 	Name string
+
+	// FirstContact is true when this identity key had never been seen before.
+	FirstContact bool
+
+	// SafetyNumber is the code to compare out of band. See e2ee/safety.go.
+	SafetyNumber string
 }
 
 // Member is one person in a room, as published in a roster packet.
@@ -64,8 +107,7 @@ type Member struct {
 	Host bool   `json:"host,omitempty"`
 }
 
-// Display is the nickname to show, falling back to a shortened ID for a peer
-// that sent no nickname.
+// Display is the nickname to show, falling back to a shortened ID.
 func (m Member) Display() string {
 	if m.Name != "" {
 		return m.Name
@@ -82,6 +124,227 @@ func ShortID(id string) string {
 	return id[:keep] + "…"
 }
 
+// ---------------------------------------------------------------------------
+// Conn: one authenticated, end-to-end encrypted link
+// ---------------------------------------------------------------------------
+
+// Conn is a live CMDC1 session over an established TLS connection.
+//
+// Send and Receive may run concurrently from different goroutines, which is what
+// the chat loops do. Two concurrent Sends are serialised, because a record must
+// reach the wire in the same order the ratchet produced it: the Double Ratchet
+// tolerates reordering in flight, but interleaving two half-written frames on
+// one socket would corrupt the stream itself.
+type Conn struct {
+	transport net.Conn
+	reader    *bufio.Reader
+	session   *e2ee.Session
+
+	// writeMu serialises sends; readMu serialises receives. They are separate so
+	// one goroutine can send while another receives, which is what the chat
+	// loops do. Two concurrent sends would interleave half-written frames on the
+	// socket; two concurrent receives would race on the buffered reader.
+	writeMu sync.Mutex
+	readMu  sync.Mutex
+	peer    Peer
+
+	// localKey is this side's own identity key, kept so a safety number can be
+	// rendered without the caller having to carry the identity around.
+	localKey ed25519.PublicKey
+
+	// firstContact records that the trust store had never seen this peer before.
+	//
+	// This is the one moment where a user's own judgement is load-bearing. Every
+	// later connection is checked against the key remembered here; the first one
+	// has nothing to check against except the ID the user typed. Surfacing it
+	// lets the interface say so, once, instead of pretending all connections are
+	// equally verified.
+	firstContact bool
+
+	closeOnce sync.Once
+	stop      chan struct{}
+}
+
+// Peer describes the authenticated far side.
+func (c *Conn) Peer() Peer { return c.peer }
+
+// FirstContact reports whether this peer's identity key had never been seen
+// before this connection.
+func (c *Conn) FirstContact() bool { return c.firstContact }
+
+// SafetyNumber is the code both people should compare out of band.
+//
+// It depends only on the two long-term identity keys, so it is stable across
+// reconnects and identical on both screens. See e2ee/safety.go for what it does
+// and does not prove.
+func (c *Conn) SafetyNumber() string {
+	return e2ee.SafetyNumber(c.localKey, c.session.Peer().PublicKey)
+}
+
+// Send encrypts and writes one packet.
+func (c *Conn) Send(p Packet) error {
+	if p.Type == "msg" && len(p.Text) > MaxMessageBytes {
+		return fmt.Errorf("message exceeds %d bytes", MaxMessageBytes)
+	}
+	plaintext, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	// The plaintext is wiped after it has been sealed. It is a short-lived heap
+	// allocation either way; see e2ee.Wipe for what this does and does not
+	// achieve in Go.
+	defer e2ee.Wipe(plaintext)
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_ = c.transport.SetWriteDeadline(time.Now().Add(WriteTimeout))
+	defer func() { _ = c.transport.SetWriteDeadline(time.Time{}) }()
+	return c.session.WriteMessage(c.transport, plaintext)
+}
+
+// Receive reads and decrypts one packet.
+//
+// "rekey" is answered and swallowed here rather than surfaced, so the ratchet
+// keeps turning during a one-sided conversation without the caller having to
+// know the protocol exists.
+func (c *Conn) Receive() (Packet, error) {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	for {
+		plaintext, err := c.session.ReadMessage(c.reader)
+		if err != nil {
+			return Packet{}, err
+		}
+		var p Packet
+		unmarshalErr := json.Unmarshal(plaintext, &p)
+		e2ee.Wipe(plaintext)
+		if unmarshalErr != nil {
+			// The record authenticated but its contents are not a packet. That
+			// is a protocol fault by an authenticated peer, not an attack the
+			// AEAD missed, so it ends the connection rather than being ignored.
+			return Packet{}, fmt.Errorf("chat: peer sent an undecodable packet: %w", unmarshalErr)
+		}
+		switch p.Type {
+		case "rekey":
+			// Answering necessarily carries this side's ratchet public key,
+			// which turns the peer's DH ratchet and re-establishes forward
+			// secrecy against anyone holding a stale copy of the session state.
+			if err := c.Send(Packet{Type: "rekey_ack"}); err != nil {
+				return Packet{}, err
+			}
+			continue
+		case "rekey_ack":
+			continue
+		}
+		return p, nil
+	}
+}
+
+// Rekey asks the peer to answer, so the DH ratchet turns.
+func (c *Conn) Rekey() error { return c.Send(Packet{Type: "rekey"}) }
+
+// Rename tells the peer this side is now called something else.
+func (c *Conn) Rename(name string) error {
+	return c.Send(Packet{Type: "nick", Name: profile.CleanNickname(name)})
+}
+
+// Close ends the session and wipes its keys.
+func (c *Conn) Close() error {
+	var err error
+	c.closeOnce.Do(func() {
+		close(c.stop)
+		_ = c.session.Close()
+		err = c.transport.Close()
+	})
+	return err
+}
+
+// RekeyCheckInterval is how often an idle connection is examined for a needed
+// DH ratchet step.
+const RekeyCheckInterval = 30 * time.Second
+
+// keepRatchetTurning periodically prompts the peer when this side has been
+// sending — or sitting idle — for long enough that no fresh DH material has been
+// mixed in.
+//
+// Without this, post-compromise security would be a property of conversations
+// where both people happen to type, and absent from the ones where they do not.
+func (c *Conn) keepRatchetTurning() {
+	ticker := time.NewTicker(RekeyCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.stop:
+			return
+		case <-ticker.C:
+			if !c.session.CanSend() || !c.session.NeedsRekey() {
+				continue
+			}
+			if err := c.Rekey(); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// credentials builds the CMDC1 identity material for a local user.
+func credentials(ident *identity.Identity, nickname string) e2ee.Credentials {
+	return e2ee.Credentials{
+		ID:        ident.ID,
+		PublicKey: ident.PublicKey,
+		Sign:      ident.Sign,
+		Nickname:  profile.CleanNickname(nickname),
+	}
+}
+
+// newConn wraps a completed CMDC1 session.
+func newConn(transport net.Conn, reader *bufio.Reader, session *e2ee.Session, localKey ed25519.PublicKey, firstContact bool) *Conn {
+	info := session.Peer()
+	c := &Conn{
+		transport:    transport,
+		reader:       reader,
+		session:      session,
+		peer:         Peer{ID: info.ID, Name: profile.CleanNickname(info.Nickname)},
+		localKey:     localKey,
+		firstContact: firstContact,
+		stop:         make(chan struct{}),
+	}
+	go c.keepRatchetTurning()
+	return c
+}
+
+// trustRecorder wraps a trust policy and notes whether the peer was new.
+//
+// The question has to be asked BEFORE the policy runs, because the policy is
+// what records the peer: afterwards, every peer looks familiar.
+type trustRecorder struct {
+	inner e2ee.TrustPolicy
+
+	mu    sync.Mutex
+	first bool
+}
+
+func (r *trustRecorder) Authorize(id string, publicKey ed25519.PublicKey) error {
+	if store, ok := r.inner.(*auth.Store); ok {
+		if _, known := store.Known(id); !known {
+			r.mu.Lock()
+			r.first = true
+			r.mu.Unlock()
+		}
+	}
+	return r.inner.Authorize(id, publicKey)
+}
+
+func (r *trustRecorder) firstContact() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.first
+}
+
+// ---------------------------------------------------------------------------
+// Host
+// ---------------------------------------------------------------------------
+
 type Host struct {
 	ID          string
 	Name        string
@@ -89,26 +352,23 @@ type Host struct {
 	Fingerprint string
 	TLSConfig   *tls.Config
 	Listener    net.Listener
-	Clients     map[net.Conn]struct{}
+	Clients     map[*Conn]struct{}
 	Mu          sync.Mutex
-	WriteMu     sync.Mutex
 
 	// members tracks who is in the room, keyed by connection so a departure can
 	// be attributed without trusting anything the leaver says on the way out.
-	members map[net.Conn]Member
+	members map[*Conn]Member
 
 	// group decides whether a second person may join at all, and whether the
-	// people here can see each other's messages. The host owns this choice;
-	// with it off, the room behaves exactly as it did before group chat existed.
+	// people here can see each other's messages.
 	group bool
 
-	// OnPeer, when set, is called once a peer has finished the TLS and identity
-	// handshake, and again with Left set when that peer goes away.
-	//
-	// It exists so a caller can wait on "somebody connected to me" at the same
-	// time as it waits on the keyboard: a CMD-Chat instance is always hosting,
-	// so the inbound side has to be able to interrupt the prompt.
+	// OnPeer, when set, is called once a peer has finished the TLS and CMDC1
+	// handshake, and again with left set when that peer goes away.
 	OnPeer func(p Peer, left bool)
+
+	// Trust vets peer identity keys. Nil means the on-disk store.
+	Trust e2ee.TrustPolicy
 }
 
 func (h *Host) announce(p Peer, left bool) {
@@ -117,11 +377,14 @@ func (h *Host) announce(p Peer, left bool) {
 	}
 }
 
+func (h *Host) trust() e2ee.TrustPolicy {
+	if h.Trust != nil {
+		return h.Trust
+	}
+	return auth.Load()
+}
+
 // SetGroup turns group chat on or off for this room.
-//
-// Turning it off does not evict anyone already here: silently dropping people
-// mid-sentence would be a worse surprise than a room that is briefly larger
-// than the setting says. It stops the next person joining.
 func (h *Host) SetGroup(enabled bool) {
 	h.Mu.Lock()
 	h.group = enabled
@@ -157,13 +420,10 @@ func (h *Host) Count() int {
 
 // sendRoster tells everyone who is here now.
 //
-// The roster is what makes a guest aware of anyone other than the host. It is
-// the host's account of the room: a guest can verify that each listed ID is
-// well-formed, but not that the list is complete or honest. See the group chat
-// note in the README.
+// The roster is the host's account of the room: a guest can verify that each
+// listed ID is well-formed, but not that the list is complete or honest.
 func (h *Host) sendRoster() {
-	roster := Packet{Type: "roster", Members: h.Members()}
-	h.broadcast(roster, nil)
+	h.broadcast(Packet{Type: "roster", Members: h.Members()}, nil)
 }
 
 // systemf broadcasts a notice that did not come from any participant.
@@ -171,6 +431,14 @@ func (h *Host) systemf(format string, args ...any) {
 	h.broadcast(Packet{Type: "system", Text: fmt.Sprintf(format, args...)}, nil)
 }
 
+// newTLSConfig builds the per-process self-signed certificate.
+//
+// The certificate is NOT the security boundary any more. It was, before CMDC1
+// existed, and that was the flaw: the fingerprint arrived from the phonebook,
+// which is one of the parties being defended against. Pinning it is still worth
+// doing as defence in depth — a mismatch means something is wrong and the
+// connection is refused — but peer authentication now rests on the Ed25519
+// handshake bound to this TLS session, not on the certificate.
 func newTLSConfig() (*tls.Config, string, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -180,30 +448,41 @@ func newTLSConfig() (*tls.Config, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	tmpl := x509.Certificate{SerialNumber: serial, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(365 * 24 * time.Hour), DNSNames: []string{"cmd-chat"}, KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	tmpl := x509.Certificate{
+		SerialNumber: serial,
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		DNSNames:     []string{"cmd-chat"},
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
 	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
 	if err != nil {
 		return nil, "", err
 	}
 	cert := tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 	sum := sha256.Sum256(der)
-	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13}, hex.EncodeToString(sum[:]), nil
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
+		MaxVersion:   tls.VersionTLS13,
+	}, hex.EncodeToString(sum[:]), nil
 }
+
 func NewHost(id, name string, ident *identity.Identity) (*Host, error) {
 	cfg, fp, err := newTLSConfig()
 	if err != nil {
 		return nil, err
 	}
-	return &Host{ID: id, Name: name, Identity: ident, Fingerprint: fp, TLSConfig: cfg, Clients: make(map[net.Conn]struct{}), members: make(map[net.Conn]Member), group: true}, nil
+	return &Host{
+		ID: id, Name: name, Identity: ident, Fingerprint: fp, TLSConfig: cfg,
+		Clients: make(map[*Conn]struct{}),
+		members: make(map[*Conn]Member),
+		group:   true,
+	}, nil
 }
 
 // Bind opens the chat listener without accepting on it yet.
-//
-// Binding is deliberately separate from serving so the caller finds out
-// straight away whether the port could be opened at all. On Windows a firewall
-// prompt that the user cancels fails here, and a caller that learns it
-// synchronously can say so and fall back to the relay, instead of a background
-// goroutine failing where nobody is looking.
 func (h *Host) Bind(port int) error {
 	ln, err := tls.Listen("tcp", fmt.Sprintf(":%d", port), h.TLSConfig)
 	if err != nil {
@@ -213,8 +492,7 @@ func (h *Host) Bind(port int) error {
 	return nil
 }
 
-// Serve accepts connections on the listener opened by Bind. It returns once the
-// listener is closed.
+// Serve accepts connections on the listener opened by Bind.
 func (h *Host) Serve() error {
 	ln := h.Listener
 	if ln == nil {
@@ -225,7 +503,7 @@ func (h *Host) Serve() error {
 		if err != nil {
 			return err
 		}
-		go h.handle(c)
+		go h.serve(c)
 	}
 }
 
@@ -233,7 +511,7 @@ func (h *Host) Serve() error {
 // listener open so the next peer can still arrive.
 func (h *Host) Disconnect() {
 	h.Mu.Lock()
-	clients := make([]net.Conn, 0, len(h.Clients))
+	clients := make([]*Conn, 0, len(h.Clients))
 	for c := range h.Clients {
 		clients = append(clients, c)
 	}
@@ -266,86 +544,112 @@ func (h *Host) Listen(port int) error {
 	fmt.Printf("Hosting as %s on %s\nTLS fingerprint: %s\n", h.ID, h.Addr(), h.Fingerprint)
 	return h.Serve()
 }
-func (h *Host) handle(c net.Conn) {
+
+// HandleConn serves one already-established transport as the host side.
+//
+// The transport may be a plain TCP connection or a relayed byte pipe; the TLS
+// session and the CMDC1 handshake are identical either way, which is what keeps
+// the relay out of the trust model.
+func (h *Host) HandleConn(raw net.Conn) { h.serve(tls.Server(raw, h.TLSConfig)) }
+
+// Accept completes both handshakes on an accepted connection and returns the
+// encrypted link. It is exported so tests can drive the host side directly.
+func (h *Host) Accept(c net.Conn) (*Conn, error) {
+	tlsConn, ok := c.(*tls.Conn)
+	if !ok {
+		return nil, errors.New("chat: host connection is not TLS")
+	}
+	_ = tlsConn.SetDeadline(time.Now().Add(HandshakeTimeout))
+	ctx, cancel := context.WithTimeout(context.Background(), HandshakeTimeout)
+	defer cancel()
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+	binding, err := e2ee.TLSChannelBinding(tlsConn)
+	if err != nil {
+		return nil, err
+	}
+	reader := bufio.NewReader(tlsConn)
+	recorder := &trustRecorder{inner: h.trust()}
+	session, err := e2ee.Respond(readWriter{reader, tlsConn}, e2ee.Config{
+		Credentials:    credentials(h.Identity, h.Name),
+		ChannelBinding: binding,
+		Trust:          recorder,
+	})
+	if err != nil {
+		return nil, err
+	}
+	_ = tlsConn.SetDeadline(time.Time{})
+	return newConn(tlsConn, reader, session, h.Identity.PublicKey, recorder.firstContact()), nil
+}
+
+// readWriter pairs a buffered reader with the underlying writer, so the
+// handshake reads through the same buffer the record layer will use afterwards.
+// Without this, bytes the handshake over-read would be lost.
+type readWriter struct {
+	io.Reader
+	io.Writer
+}
+
+// serve runs one guest connection from TLS handshake to disconnection.
+func (h *Host) serve(c net.Conn) {
 	defer c.Close()
-	dec := json.NewDecoder(bufio.NewReader(c))
 
-	var challenge auth.Challenge
-	if err := dec.Decode(&challenge); err != nil || challenge.Type != "auth_challenge" {
-		return
-	}
-	hostResponse, err := auth.RespondAs(h.Identity, &challenge, h.Name)
+	conn, err := h.Accept(c)
 	if err != nil {
+		// Deliberately terse. A failed handshake is either a scan, a stale
+		// client, or an attack, and none of them should be told which check
+		// rejected them. The detail goes to the debug log, never the wire.
+		debug.Log("Inbound handshake rejected: %v", err)
 		return
 	}
-	if err = h.writeJSON(c, hostResponse); err != nil {
-		return
+	defer conn.Close()
+
+	member := Member{ID: conn.Peer().ID, Name: conn.Peer().Name}
+	inbound := Peer{
+		ID:           member.ID,
+		Name:         member.Name,
+		FirstContact: conn.FirstContact(),
+		SafetyNumber: conn.SafetyNumber(),
 	}
 
-	ownChallenge, err := auth.NewChallenge()
-	if err != nil {
-		return
-	}
-	if err = h.writeJSON(c, ownChallenge); err != nil {
-		return
-	}
-
-	var clientResponse auth.Response
-	if err = dec.Decode(&clientResponse); err != nil {
-		return
-	}
-	if err = auth.Verify(ownChallenge, &clientResponse); err != nil {
-		_ = h.writePacket(c, Packet{Type: "error", Text: "authentication failed"})
-		return
-	}
-	store := auth.Load()
-	if err = store.Trust(clientResponse.ID, clientResponse.PublicKey); err != nil {
-		_ = h.writePacket(c, Packet{Type: "error", Text: "peer identity key changed; refusing connection"})
-		return
-	}
-
-	// The nickname is whatever the peer chose to call itself. It is cleaned
-	// before it is stored, because from here on it gets printed on other
-	// people's terminals.
-	member := Member{ID: clientResponse.ID, Name: profile.CleanNickname(clientResponse.Name)}
-
-	// Admission. With group chat off, the room holds one guest and the second
-	// is told why rather than being dropped without explanation.
+	// Admission. With group chat off, the room holds one guest and the second is
+	// told why rather than being dropped without explanation.
 	h.Mu.Lock()
 	if !h.group && len(h.members) > 0 {
 		h.Mu.Unlock()
-		_ = h.writePacket(c, Packet{Type: "error", Text: "this host is already in a chat and has group chat turned off"})
+		_ = conn.Send(Packet{Type: "error", Text: "this host is already in a chat and has group chat turned off"})
 		return
 	}
-	h.Clients[c] = struct{}{}
-	h.members[c] = member
+	h.Clients[conn] = struct{}{}
+	h.members[conn] = member
 	h.Mu.Unlock()
 
-	peer := Peer{ID: member.ID, Name: member.Name}
+	peer := inbound
 	defer func() {
 		h.Mu.Lock()
-		delete(h.Clients, c)
-		delete(h.members, c)
+		delete(h.Clients, conn)
+		delete(h.members, conn)
 		h.Mu.Unlock()
 		h.announce(peer, true)
 		if h.Group() {
-			h.systemf("%s left", displayOf(member))
+			h.systemf("%s left", member.Display())
 			h.sendRoster()
 		}
 	}()
 
-	if err = h.writePacket(c, Packet{Type: "hello", From: h.ID, Name: h.Name, Group: h.Group()}); err != nil {
+	if err := conn.Send(Packet{Type: "hello", From: h.ID, Name: h.Name, Group: h.Group()}); err != nil {
 		return
 	}
 	h.announce(peer, false)
 	if h.Group() {
-		h.broadcastExcept(Packet{Type: "system", Text: fmt.Sprintf("%s joined", displayOf(member))}, c)
+		h.broadcast(Packet{Type: "system", Text: fmt.Sprintf("%s joined", member.Display())}, conn)
 		h.sendRoster()
 	}
 
 	for {
-		var p Packet
-		if err := dec.Decode(&p); err != nil {
+		p, err := conn.Receive()
+		if err != nil {
 			return
 		}
 
@@ -354,10 +658,10 @@ func (h *Host) handle(c net.Conn) {
 		if p.Type == "nick" {
 			renamed := Member{ID: member.ID, Name: profile.CleanNickname(p.Name)}
 			h.Mu.Lock()
-			h.members[c] = renamed
+			h.members[conn] = renamed
 			h.Mu.Unlock()
-			if h.Group() && displayOf(renamed) != displayOf(member) {
-				h.systemf("%s is now %s", displayOf(member), displayOf(renamed))
+			if h.Group() && renamed.Display() != member.Display() {
+				h.systemf("%s is now %s", member.Display(), renamed.Display())
 				h.sendRoster()
 			}
 			member = renamed
@@ -367,36 +671,31 @@ func (h *Host) handle(c net.Conn) {
 		if p.Type != "msg" {
 			continue
 		}
-		if len([]byte(p.Text)) > MaxMessageBytes {
-			_ = h.writePacket(c, Packet{Type: "error", Text: "message exceeds 4096 bytes"})
+		if len(p.Text) > MaxMessageBytes {
+			_ = conn.Send(Packet{Type: "error", Text: "message exceeds 4096 bytes"})
 			continue
 		}
 
 		// Relay under the identity this connection actually authenticated as,
 		// never under the one the packet claims. Without this, any guest could
 		// put words in another guest's mouth simply by setting From and Name.
-		fmt.Printf("\r[%s] %s\n> ", displayOf(member), p.Text)
+		fmt.Printf("\r[%s] %s\n> ", member.Display(), p.Text)
 		if h.Group() {
-			h.broadcastExcept(Packet{Type: "msg", From: member.ID, Name: member.Name, Text: p.Text}, c)
+			h.broadcast(Packet{Type: "msg", From: member.ID, Name: member.Name, Text: p.Text}, conn)
 		}
 	}
 }
 
-// displayOf is the label shown for a member.
-func displayOf(m Member) string { return m.Display() }
-func (h *Host) writeJSON(c net.Conn, v any) error {
-	h.WriteMu.Lock()
-	defer h.WriteMu.Unlock()
-	// A deadline here is what stops one unresponsive participant holding up
-	// every other person in the room; see WriteTimeout.
-	_ = c.SetWriteDeadline(time.Now().Add(WriteTimeout))
-	defer func() { _ = c.SetWriteDeadline(time.Time{}) }()
-	return json.NewEncoder(c).Encode(v)
-}
-func (h *Host) writePacket(c net.Conn, p Packet) error { return h.writeJSON(c, p) }
-func (h *Host) broadcast(p Packet, except net.Conn) {
+// WriteTimeout bounds a single write to one participant.
+//
+// In a room, broadcast writes to everyone in turn, so one peer that has stopped
+// reading would stall the write and freeze the conversation for everybody else.
+// A peer that cannot accept a message within this window is dropped instead.
+const WriteTimeout = 10 * time.Second
+
+func (h *Host) broadcast(p Packet, except *Conn) {
 	h.Mu.Lock()
-	clients := make([]net.Conn, 0, len(h.Clients))
+	clients := make([]*Conn, 0, len(h.Clients))
 	for c := range h.Clients {
 		if c != except {
 			clients = append(clients, c)
@@ -404,125 +703,18 @@ func (h *Host) broadcast(p Packet, except net.Conn) {
 	}
 	h.Mu.Unlock()
 	for _, c := range clients {
-		if err := h.writePacket(c, p); err != nil {
+		if err := c.Send(p); err != nil {
 			_ = c.Close()
 		}
 	}
 }
 
-// WriteTimeout bounds a single write to one participant.
-//
-// In a two-person chat a wedged peer only hurt itself. In a room, broadcast
-// writes to everyone in turn, so one peer that has stopped reading — suspended
-// laptop, dead Wi-Fi, a debugger — would stall the write and freeze the
-// conversation for everybody else. A peer that cannot accept a message within
-// this window is dropped instead.
-const WriteTimeout = 10 * time.Second
-
-// broadcastExcept sends to everyone but one connection, usually the sender.
-func (h *Host) broadcastExcept(p Packet, except net.Conn) { h.broadcast(p, except) }
+// Broadcast sends a packet to everyone in the room.
 func (h *Host) Broadcast(p Packet) {
-	if p.Type == "msg" && len([]byte(p.Text)) > MaxMessageBytes {
+	if p.Type == "msg" && len(p.Text) > MaxMessageBytes {
 		return
 	}
 	h.broadcast(p, nil)
-}
-
-// DialTimeout bounds a direct TCP connection attempt so a black-holed candidate
-// cannot stall the connection strategy.
-const DialTimeout = 8 * time.Second
-
-// HandleConn serves one already-established transport as the host side.
-//
-// The transport may be a plain TCP connection or a relayed byte pipe; the TLS
-// session and the CMD-Chat handshake are identical either way, which is what
-// keeps the relay out of the trust model.
-func (h *Host) HandleConn(raw net.Conn) { h.handle(tls.Server(raw, h.TLSConfig)) }
-
-func Client(address, expectedFingerprint, expectedHostID, id, name string, ident *identity.Identity) (net.Conn, *json.Decoder, error) {
-	raw, err := net.DialTimeout("tcp", address, DialTimeout)
-	if err != nil {
-		return nil, nil, err
-	}
-	return ClientConn(raw, expectedFingerprint, expectedHostID, id, name, ident)
-}
-
-// ClientConn runs the client handshake over an already-established transport.
-//
-// Certificate pinning and the mutual Ed25519 challenge happen here, end to end,
-// so a relayed connection is authenticated exactly as strictly as a direct one:
-// a relay that tampered with the stream would fail the fingerprint check.
-func ClientConn(raw net.Conn, expectedFingerprint, expectedHostID, id, name string, ident *identity.Identity) (net.Conn, *json.Decoder, error) {
-	c := tls.Client(raw, &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true})
-	if err := c.Handshake(); err != nil {
-		_ = raw.Close()
-		return nil, nil, err
-	}
-	state := c.ConnectionState()
-	if len(state.PeerCertificates) == 0 {
-		_ = c.Close()
-		return nil, nil, errors.New("host sent no certificate")
-	}
-	sum := sha256.Sum256(state.PeerCertificates[0].Raw)
-	actual := hex.EncodeToString(sum[:])
-	expected := strings.TrimSpace(expectedFingerprint)
-	if expected != "" && !strings.EqualFold(actual, expected) {
-		_ = c.Close()
-		return nil, nil, fmt.Errorf("host fingerprint mismatch")
-	}
-	if expected == "" {
-		fmt.Println("Warning: host certificate is not pinned; identity authentication is still required.")
-	}
-	reader := bufio.NewReader(c)
-	dec := json.NewDecoder(reader)
-	challenge, err := auth.NewChallenge()
-	if err != nil {
-		_ = c.Close()
-		return nil, nil, err
-	}
-	if err = json.NewEncoder(c).Encode(challenge); err != nil {
-		_ = c.Close()
-		return nil, nil, err
-	}
-	var hostResponse auth.Response
-	if err = dec.Decode(&hostResponse); err != nil {
-		_ = c.Close()
-		return nil, nil, err
-	}
-	if err = auth.Verify(challenge, &hostResponse); err != nil {
-		_ = c.Close()
-		return nil, nil, fmt.Errorf("host identity authentication failed: %w", err)
-	}
-	if expectedHostID != "" && hostResponse.ID != expectedHostID {
-		_ = c.Close()
-		return nil, nil, fmt.Errorf("host identity mismatch: expected %s, got %s", expectedHostID, hostResponse.ID)
-	}
-	store := auth.Load()
-	if err = store.Trust(hostResponse.ID, hostResponse.PublicKey); err != nil {
-		_ = c.Close()
-		return nil, nil, fmt.Errorf("trusted host key changed: %w", err)
-	}
-	var hostChallenge auth.Challenge
-	if err = dec.Decode(&hostChallenge); err != nil {
-		_ = c.Close()
-		return nil, nil, err
-	}
-	response, err := auth.RespondAs(ident, &hostChallenge, profile.CleanNickname(name))
-	if err != nil {
-		_ = c.Close()
-		return nil, nil, err
-	}
-	if err = json.NewEncoder(c).Encode(response); err != nil {
-		_ = c.Close()
-		return nil, nil, err
-	}
-	return c, dec, nil
-}
-
-// Rename tells the host this guest is now called something else, so the roster
-// and the labels on its messages follow without reconnecting.
-func Rename(c net.Conn, name string) error {
-	return json.NewEncoder(c).Encode(Packet{Type: "nick", Name: profile.CleanNickname(name)})
 }
 
 // SetName changes the nickname this host presents and republishes the roster.
@@ -536,24 +728,141 @@ func (h *Host) SetName(name string) {
 	}
 }
 
-func Send(c net.Conn, p Packet) error {
-	if p.Type == "msg" && len([]byte(p.Text)) > MaxMessageBytes {
-		return fmt.Errorf("message exceeds %d bytes", MaxMessageBytes)
+// ---------------------------------------------------------------------------
+// Client
+// ---------------------------------------------------------------------------
+
+// DialTimeout bounds a direct TCP connection attempt so a black-holed candidate
+// cannot stall the connection strategy.
+const DialTimeout = 8 * time.Second
+
+// ClientOptions configures the guest side of a connection.
+type ClientOptions struct {
+	// Fingerprint pins the host's TLS certificate when one is known. Empty
+	// means unpinned, which is no longer dangerous on its own: peer
+	// authentication is the CMDC1 handshake, not the certificate.
+	Fingerprint string
+
+	// ExpectHostID requires the host to authenticate as exactly this CMD-Chat
+	// ID. Set it whenever the ID is known — which is every path except an
+	// explicit --address dial — so a phonebook that returns the wrong peer is
+	// caught rather than becoming a conversation with a stranger.
+	ExpectHostID string
+
+	// Nickname is the self-chosen display label to present.
+	Nickname string
+
+	// Identity is this user's long-term key. Required.
+	Identity *identity.Identity
+
+	// Trust vets the host's identity key. Nil means the on-disk store, which is
+	// what production uses; tests supply their own so they never touch the
+	// user's real trust database.
+	Trust e2ee.TrustPolicy
+}
+
+// Client dials an address and runs both handshakes.
+func Client(address, expectedFingerprint, expectedHostID, name string, ident *identity.Identity) (*Conn, error) {
+	raw, err := net.DialTimeout("tcp", address, DialTimeout)
+	if err != nil {
+		return nil, err
 	}
-	return json.NewEncoder(c).Encode(p)
+	return ClientConn(raw, expectedFingerprint, expectedHostID, name, ident)
+}
+
+// Dial runs the guest handshake over an established transport.
+func Dial(raw net.Conn, opts ClientOptions) (*Conn, error) {
+	conn, err := clientConn(raw, opts.Fingerprint, opts.ExpectHostID, opts.Nickname, opts.Identity, opts.Trust)
+	if err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+// ClientConn runs the guest handshake over an already-established transport.
+//
+// Three things happen here, in order, and all three must pass:
+//
+//  1. TLS 1.3, with the host's certificate pinned when a fingerprint is known.
+//  2. The CMDC1 handshake, bound to that exact TLS session.
+//  3. The trust-on-first-use check on the host's Ed25519 identity key.
+//
+// A relayed connection is authenticated exactly as strictly as a direct one,
+// because none of the three depends on how the bytes arrived.
+func ClientConn(raw net.Conn, expectedFingerprint, expectedHostID, name string, ident *identity.Identity) (*Conn, error) {
+	return Dial(raw, ClientOptions{
+		Fingerprint:  expectedFingerprint,
+		ExpectHostID: expectedHostID,
+		Nickname:     name,
+		Identity:     ident,
+	})
+}
+
+func clientConn(raw net.Conn, expectedFingerprint, expectedHostID, name string, ident *identity.Identity, trust e2ee.TrustPolicy) (*Conn, error) {
+	// InsecureSkipVerify is correct here and always was: there is no CA in this
+	// system and the certificate is self-signed per process. What has changed is
+	// that it is no longer load-bearing. Peer authentication is the CMDC1
+	// handshake below, which is bound to this TLS session, so a substituted
+	// certificate does not buy an attacker a conversation — it buys a failed
+	// handshake.
+	c := tls.Client(raw, &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		MaxVersion:         tls.VersionTLS13,
+		InsecureSkipVerify: true,
+	})
+	_ = c.SetDeadline(time.Now().Add(HandshakeTimeout))
+	ctx, cancel := context.WithTimeout(context.Background(), HandshakeTimeout)
+	defer cancel()
+	if err := c.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+
+	state := c.ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		return nil, errors.New("host sent no certificate")
+	}
+	sum := sha256.Sum256(state.PeerCertificates[0].Raw)
+	actual := hex.EncodeToString(sum[:])
+	if expected := strings.TrimSpace(expectedFingerprint); expected != "" && !strings.EqualFold(actual, expected) {
+		// Fail closed. The identity handshake would very likely catch this too,
+		// but a certificate that does not match what the phonebook published
+		// means something is wrong, and continuing to find out what is not the
+		// right instinct.
+		return nil, errors.New("host certificate fingerprint mismatch")
+	}
+
+	binding, err := e2ee.TLSChannelBinding(c)
+	if err != nil {
+		return nil, err
+	}
+	if trust == nil {
+		trust = auth.Load()
+	}
+	recorder := &trustRecorder{inner: trust}
+	reader := bufio.NewReader(c)
+	session, err := e2ee.Initiate(readWriter{reader, c}, e2ee.Config{
+		Credentials:    credentials(ident, name),
+		ChannelBinding: binding,
+		Trust:          recorder,
+		ExpectPeerID:   expectedHostID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("host identity authentication failed: %w", err)
+	}
+	_ = c.SetDeadline(time.Time{})
+	return newConn(c, reader, session, ident.PublicKey, recorder.firstContact()), nil
 }
 
 // ReadLoop delivers packets until the connection ends.
 //
-// It prints nothing. The caller already announces that the chat closed, and
-// when the caller is the one who closed it — /quit — the socket error is an
-// implementation detail the user should never have seen. It used to print
-// "Connection closed: use of closed network connection" after every /quit.
-func ReadLoop(dec *json.Decoder, onMessage func(Packet)) {
+// It prints nothing, and it logs no message content. The caller already
+// announces that the chat closed, and message text must never reach a log file.
+func ReadLoop(c *Conn, onMessage func(Packet)) {
 	for {
-		var p Packet
-		if err := dec.Decode(&p); err != nil {
-			if err != io.EOF {
+		p, err := c.Receive()
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
 				debug.Log("Chat read loop ended: %v", err)
 			}
 			return
