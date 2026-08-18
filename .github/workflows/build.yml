@@ -226,13 +226,56 @@ jobs:
           - Over a hundred new tests, including adversarial ones that run a real
             man-in-the-middle holding both TLS sessions and confirm it gets nothing.
 
+          ## Also new: group chats, and a name of your own
+
+          These landed alongside the encryption work and ship for the first time here.
+
+          ### Group chats
+
+          More than one person can join you now, and everyone in the room sees everyone
+          else. There is nothing to create and no room code: whoever gets connected to is
+          hosting, and **the room is that person's ID**.
+
+          - **`/invite`** shows the ID that adds someone. This is the bit that's easy to
+            get wrong — if you joined someone else, the ID to share is *theirs*, not
+            yours, because your own would start a separate chat instead.
+          - **`/who`** lists the room, and you'll see `* Jordan joined - 3 here` as people
+            come and go.
+          - **`/group off`** turns a room back into a one-to-one chat if you're hosting.
+            Anyone already there stays; the next person to try is told why instead of
+            being dropped in silence. The setting is remembered.
+
+          **Read the note above about what a room is.** Every link in it is individually
+          end-to-end encrypted, and nobody can impersonate anyone — every relayed message
+          is labelled with the identity that connection actually proved, not with whatever
+          the message claimed. But guests reach each other *through* the host, so the host
+          can read what it passes on. Host rooms with people you'd trust to carry your
+          messages.
+
+          ### Pick a nickname
+
+          **`/nick Alex`** and everyone sees *Alex* beside your messages instead of your
+          computer's account name.
+
+          Your nickname is stored **on your own computer only**. It is not in the
+          phonebook, not in any database, and **nobody can look it up from your ID** — it
+          reaches only the people you're actually chatting with, inside the encrypted
+          connection. `/nick` on its own puts it back.
+
+          ### Update notices on launch
+
+          CMD-Chat asks GitHub whether a newer release exists and tells you once if one
+          does. It **never installs anything**, **sends nothing about you** — one anonymous
+          request asking what the newest version is — and **never delays launch**. Turn it
+          off with `CMD_CHAT_NO_UPDATE_CHECK=1`.
+
           ### Carried over from v2.1.4
 
-          - Group chats, `/invite`, `/who`, `/group off`, and `/nick`.
-          - Update notices on launch, which send nothing about you and never install
-            anything. Turn them off with `CMD_CHAT_NO_UPDATE_CHECK=1`.
           - "Start a chat" no longer closes the terminal, and a blocked Windows firewall
             port is explained instead of silently breaking connectivity.
+          - The window stays open when something goes wrong, on every platform.
+          - Leaving a chat with `/quit` returns you to the prompt instead of closing
+            CMD-Chat.
           NOTES
       - name: Publish GitHub release
         # The single place a release is created. A second workflow used to publish
