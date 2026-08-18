@@ -10,22 +10,30 @@ import (
 )
 
 var (
-	mu sync.Mutex
+	mu      sync.Mutex
 	enabled bool
-	file *os.File
+	file    *os.File
 )
 
 func Enable() (string, error) {
 	mu.Lock()
 	defer mu.Unlock()
-	if enabled && file != nil { return file.Name(), nil }
+	if enabled && file != nil {
+		return file.Name(), nil
+	}
 	dir, err := os.UserConfigDir()
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	dir = filepath.Join(dir, "CMD-Chat", "logs")
-	if err := os.MkdirAll(dir, 0o755); err != nil { return "", err }
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
 	path := filepath.Join(dir, fmt.Sprintf("crash-%s.log", time.Now().Format("20060102-150405")))
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	file, enabled = f, true
 	writeLocked("Debug logging enabled")
 	return path, nil
@@ -36,7 +44,9 @@ func Enabled() bool { mu.Lock(); defer mu.Unlock(); return enabled }
 func Log(format string, args ...any) {
 	mu.Lock()
 	defer mu.Unlock()
-	if !enabled || file == nil { return }
+	if !enabled || file == nil {
+		return
+	}
 	writeLocked(format, args...)
 }
 
@@ -56,7 +66,9 @@ func Recover() {
 func Report(r any) {
 	mu.Lock()
 	defer mu.Unlock()
-	if !enabled || file == nil { return }
+	if !enabled || file == nil {
+		return
+	}
 	writeLocked("PANIC: %v", r)
 	_, _ = file.Write(debug.Stack())
 	_ = file.Sync()
@@ -72,7 +84,9 @@ func Report(r any) {
 // ends there.
 func Contain(where string) {
 	r := recover()
-	if r == nil { return }
+	if r == nil {
+		return
+	}
 	Report(r)
 	fmt.Printf("\n[%s stopped unexpectedly: %v]\n", where, r)
 }

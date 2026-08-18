@@ -47,7 +47,7 @@ It means there is no permanent CMD-Chat backend sitting in the middle of every c
 There *are* two small always-on services, and neither is a chat server:
 
 - The [phonebook](#the-phonebook-finding-peers-across-networks) is a directory. It helps two peers find each other and then plays no part in the conversation. Chat traffic never passes through it, and on a LAN it is not used at all.
-- The [relay](#the-relay-when-a-direct-connection-is-impossible) is a blind byte pipe, used only when a direct connection is impossible. It forwards an already-encrypted session it cannot read, holds no keys, and stores nothing.
+- The [relay](#the-relay-when-a-direct-connection-is-impossible) is a blind byte pipe, used only when a direct connection is impossible. It forwards an end-to-end encrypted session it cannot read, holds no keys, and stores nothing.
 
 Neither one can read your messages, keep your history, or host a room. The conversation still lives on the two computers having it.
 
@@ -163,6 +163,76 @@ The properties that matter:
 ```text
 cmd-chat version
 ```
+
+## Group chats
+
+A room holds more than two people. There is nothing to create and no room code:
+whoever is connected to is hosting, and **the room is that host's ID**. A third
+person joins by pasting the same ID the second person did.
+
+```text
+star: what CMD-Chat does          mesh: what it does not
+
+        Sam                            Sam --- Jordan
+       /                                 \  X  /
+  alex --- Jordan                          X
+       \                                 /  X  \
+        Kim                            Kim --- (...)
+
+  one connection per person       one connection per pair
+```
+
+The host relays; the guests never connect to each other. That keeps one TCP
+connection and one NAT traversal per person instead of one per pair.
+
+- `/who` lists the room.
+- `/invite` prints the ID that adds someone. A guest's own ID would open a
+  *separate* chat, so `/invite` says explicitly which ID is which.
+- `/group off` makes a host one-to-one again; the next person to try is told
+  why rather than being dropped in silence. The setting is stored locally.
+- Join and leave notices arrive as `* Jordan joined - 3 here`.
+
+### What group chat means for trust
+
+Two-person CMD-Chat has no trusted middle: each side authenticates the other
+end to end. A room does have one, and it is worth being precise about where:
+
+- **The host cannot be impersonated, and neither can any guest.** Every message
+  a host relays is labelled with the identity that connection actually proved in
+  the Ed25519 handshake, not with whatever the packet claimed. A guest that sets
+  another member's ID and nickname on its own messages is relabelled with its
+  own. This is enforced by `TestHostRelabelsMessagesWithTheAuthenticatedIdentity`.
+- **The host is trusted for attribution between guests.** A guest authenticates
+  the host, and only the host. Messages and the roster reach it via the host, so
+  a dishonest host could forge a message from another member, drop one, or list
+  someone who is not there. In a two-person chat this is vacuous — the host is
+  your only counterparty. In a room it is a real difference.
+- **The relay and the phonebook are unaffected.** Neither can read anything; the
+  CMDC1 session is end to end between each guest and the host, inside TLS.
+
+Closing the last gap needs per-sender signatures, which the identity design
+already supports — a CMD-Chat ID is a hash of its public key, so a guest can
+check any member's key against its ID without trusting the host. That is not in
+this release. **Host a room with people you would trust to relay your messages.**
+
+## Nicknames
+
+By default you appear as your operating-system account name. `/nick Alex`
+changes it.
+
+A nickname is stored in `profile.json` next to your identity, **on your computer
+only**:
+
+- **It is never published.** The phonebook stores an ID, a public key, a
+  certificate fingerprint and short-lived addresses. A nickname is none of those,
+  and adding one would turn a directory of addresses into a directory of people.
+  `TestNicknameNeverReachesThePhonebook` asserts this against the bytes the
+  client actually sends.
+- **It only reaches people you are chatting with**, inside the authenticated
+  session.
+- **It proves nothing.** It is self-chosen and unsigned; two people may pick the
+  same one. The ID beside it is the part that is proven. Control characters are
+  stripped before a nickname is printed, so it cannot redraw someone's terminal.
 
 ## Your ID stays the same
 
@@ -281,7 +351,7 @@ fallback, only when direct fails
               (blind)
 ```
 
-**The relay cannot read your messages.** It is a byte pipe, not a chat server. Your TLS 1.3 session is established *end to end through* the pipe, so the relay only ever sees ciphertext, and your client still pins the host's certificate fingerprint exactly as it does on a LAN. A hostile relay can drop or delay traffic; it cannot read it, forge it, or impersonate your peer.
+**The relay cannot read your messages.** It is a byte pipe, not a chat server. Both your TLS 1.3 session *and* your CMDC1 end-to-end session are established through the pipe, so the relay only ever sees ciphertext. A hostile relay can drop or delay traffic; it cannot read it, forge it, or impersonate your peer — and because the CMDC1 handshake is cryptographically bound to the TLS session it runs in, it cannot become a man in the middle even if it terminates TLS on both sides. That is exercised directly by `TestTLSTerminatingRelayCannotBecomeAManInTheMiddle`.
 
 This is enforced, not just asserted — `TestChatOverArbitraryTransportIsOpaque` runs the real handshake through an observed pipe and fails if the message text, either CMD-Chat ID, or either user name appears in the bytes crossing it.
 
@@ -310,22 +380,63 @@ The directory URL is configurable in one place (`internal/phonebook`), and can b
 
 ## Security
 
-Serverless does not mean "unsecured."
+Full details are in **[SECURITY.md](SECURITY.md)**, including the threat model,
+the exact key schedule, and an honest list of what is *not* protected.
 
-CMD-Chat uses:
+CMD-Chat carries **two independent layers of encryption**:
 
-- **TLS 1.3** for encrypted transport.
-- **Ed25519 identities** so a peer can prove ownership of its persistent ID.
-- **Nonce-based authentication** to prevent simply claiming someone else's ID.
-- **Local peer-key pinning** so an already-trusted ID cannot silently switch to a different key.
-- Optional **TLS certificate fingerprint pinning** for an additional verification layer.
-- **Signed phonebook writes** so a listing can only be created, refreshed or removed by the holder of the matching private key.
-- **Signed relay joins**, bound to a specific session and role, so only the owner of an ID can wait for peers as that ID.
-- **End-to-end encryption across the relay**, so the fallback path is not a trusted party.
+| Layer | Protocol | Protects against |
+|---|---|---|
+| Transport | **TLS 1.3** | passive observers, tampering on the hop |
+| Application | **CMDC1** | the relay, the phonebook, Cloudflare, an ISP, and anyone who has terminated or broken TLS |
 
-The private identity key remains on the device, including when publishing to the phonebook and when joining the relay — only the public key and a signature are ever sent.
+CMDC1 is CMD-Chat's application-layer end-to-end protocol. It runs *inside* the
+TLS session and is keyed only by the two endpoints. Everything the relay moves is
+opaque ciphertext.
 
-This project is a security-oriented prototype and has not undergone a formal security audit.
+- **SIGMA-I handshake** — mutually authenticated ephemeral X25519, signed with
+  your existing Ed25519 identity. The same pattern as IKEv2 and TLS 1.3's own
+  authentication.
+- **Bound to the TLS session it runs in** (RFC 5705 exporter). A man in the
+  middle who terminates TLS on both sides holds two different sessions, so the
+  signatures it forwards do not verify and the handshake fails. Certificate
+  pinning is now defence in depth, not the thing holding the system up.
+- **Double Ratchet** (the published algorithm, unmodified) for the record layer:
+  a fresh ChaCha20-Poly1305 key *and* nonce for every single message.
+- **Forward secrecy.** The identity key signs; it never encrypts. Stealing it
+  later decrypts nothing captured earlier.
+- **Post-compromise security.** Fresh X25519 material is mixed in on every reply,
+  and an idle or one-sided session prompts the peer for one, so an attacker
+  evicted from an endpoint loses access again.
+- **Replay and reordering handled properly.** A message key is destroyed the
+  moment it is used, so no ciphertext decrypts twice; out-of-order and lost
+  messages are tolerated, and out-of-window ones are refused.
+- **Key changes fail closed.** A known ID presenting a different identity key
+  aborts the connection. There is no "accept anyway" — only the deliberate
+  `cmd-chat forget <id>`.
+- **Safety numbers.** `/verify` shows a code derived from both identity keys.
+  Compare it on a call to rule out a man in the middle on first contact.
+- **Private keys sealed at rest** — Windows DPAPI by default, or
+  `CMD_CHAT_IDENTITY_PASSPHRASE` (scrypt + XChaCha20-Poly1305) on any platform.
+  Run `cmd-chat security` to see which is in use.
+- **No message content is ever logged**, at any log level.
+
+Every primitive comes from the Go standard library or `golang.org/x/crypto`. No
+cryptography is implemented in this repository, and no ratchet was invented.
+
+### What this does not do
+
+- It does **not** hide metadata. The phonebook sees who is online and who looks
+  whom up; the relay sees two IDs, two IP addresses, and message sizes and
+  timing. See [SECURITY.md §10](SECURITY.md#10-metadata--what-each-party-can-see).
+- Group rooms are **not** group end-to-end encryption. A room is a star of
+  two-party sessions around a human host, and **the host can read what it
+  relays**. See [SECURITY.md §9](SECURITY.md#9-group-rooms-what-is-and-is-not-end-to-end).
+- It does not protect a device someone else controls.
+- There is no post-quantum key agreement yet.
+
+**This code has not been independently audited.** It is not "unbreakable" and
+not "100% secure", and nothing here should be read as claiming otherwise.
 
 ## Cross-platform
 
@@ -476,6 +587,12 @@ Host without waiting on the relay (direct connections only):
 cmd-chat host --relay=false
 ```
 
+Host one-to-one instead of allowing a room:
+
+```text
+cmd-chat host --group=false
+```
+
 Join a host. CMD-Chat tries your LAN, then a direct connection, then the relay:
 
 ```text
@@ -517,6 +634,7 @@ internal/network/    connectivity and NAT-related networking
 internal/ipc/        local ChromeOS-to-Go bridge
 internal/update/     launch-time check for a newer published release
 internal/debug/      opt-in debug logging and crash reports
+internal/profile/    machine-local preferences: nickname, group-chat setting
 
 workers/phonebook/   Cloudflare Worker + D1 rendezvous directory
   src/               request handling, validation, signature verification

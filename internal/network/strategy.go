@@ -5,13 +5,13 @@ package network
 type Strategy string
 
 const (
-    Localhost Strategy = "localhost"
-    LAN Strategy = "lan"
-    Direct Strategy = "direct"
-    NATTraversal Strategy = "nat-traversal"
-    RelayFallback Strategy = "relay-fallback"
+	Localhost     Strategy = "localhost"
+	LAN           Strategy = "lan"
+	Direct        Strategy = "direct"
+	NATTraversal  Strategy = "nat-traversal"
+	RelayFallback Strategy = "relay-fallback"
 )
 
 func Order() []Strategy {
-    return []Strategy{Localhost, LAN, Direct, NATTraversal, RelayFallback}
+	return []Strategy{Localhost, LAN, Direct, NATTraversal, RelayFallback}
 }

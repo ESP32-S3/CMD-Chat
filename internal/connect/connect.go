@@ -61,10 +61,23 @@ const (
 
 // Result is an established transport, before any TLS handshake.
 type Result struct {
-	Conn        net.Conn
-	Path        Path
-	Detail      string
-	HostID      string
+	Conn   net.Conn
+	Path   Path
+	Detail string
+
+	// HostID is the identity the caller must require the peer to prove.
+	//
+	// It is ALWAYS the ID the user typed, never one that came back from the
+	// phonebook, from a LAN broadcast, or from the relay. Those are all
+	// attacker-influenced channels, and on first contact the trust store has
+	// nothing to catch a substitution with. Pinning the user's own input is what
+	// makes the first exchange safe: the ID is a hash of the peer's public key,
+	// so typing it already commits to that exact key.
+	HostID string
+
+	// Fingerprint is the TLS certificate fingerprint the directory published, or
+	// empty. It is defence in depth only — it arrives over the same channel as
+	// everything else here, so it is never the thing being trusted.
 	Fingerprint string
 }
 
@@ -133,7 +146,7 @@ func Join(target string, opts Options) (*Result, error) {
 	}
 
 	if opts.Force == "" || opts.Force == PathDirect {
-		if result := tryDirect(peer, &opts); result != nil {
+		if result := tryDirect(target, peer, &opts); result != nil {
 			return result, nil
 		}
 		if opts.Force == PathDirect {
@@ -141,7 +154,7 @@ func Join(target string, opts Options) (*Result, error) {
 		}
 	}
 
-	return tryRelay(peer, &opts)
+	return tryRelay(target, peer, &opts)
 }
 
 // ForceFromEnv reads the CMD_CHAT_TRANSPORT diagnostic override. Unrecognised
@@ -182,7 +195,8 @@ func tryLAN(target string, opts *Options) *Result {
 	}
 
 	opts.Log("[network] connected over the local network")
-	return &Result{Conn: conn, Path: PathLAN, Detail: "LAN", HostID: a.ID, Fingerprint: a.Fingerprint}
+	// HostID is the caller's target, not a.ID: an announcement is unauthenticated.
+	return &Result{Conn: conn, Path: PathLAN, Detail: "LAN", HostID: target, Fingerprint: a.Fingerprint}
 }
 
 func lookup(target string, opts *Options) (*phonebook.Peer, error) {
@@ -211,7 +225,7 @@ func lookup(target string, opts *Options) (*phonebook.Peer, error) {
 	return peer, nil
 }
 
-func tryDirect(peer *phonebook.Peer, opts *Options) *Result {
+func tryDirect(target string, peer *phonebook.Peer, opts *Options) *Result {
 	endpoints := peer.TCPEndpoints()
 	if len(endpoints) == 0 {
 		opts.Log("[network] no direct address available for this peer")
@@ -229,7 +243,7 @@ func tryDirect(peer *phonebook.Peer, opts *Options) *Result {
 	family := addressFamily(endpoint)
 	opts.Log("[network] direct connection succeeded (%s)", family)
 	opts.Debug("direct connection established to %s", endpoint)
-	return &Result{Conn: conn, Path: PathDirect, Detail: family, HostID: peer.ID, Fingerprint: peer.Fingerprint}
+	return &Result{Conn: conn, Path: PathDirect, Detail: family, HostID: target, Fingerprint: peer.Fingerprint}
 }
 
 // dialFastest races every candidate at once and keeps the first that answers.
@@ -319,7 +333,7 @@ func dialFastest(endpoints []string, budget time.Duration, debug Logf) (net.Conn
 	return winner, winnerEndpoint, nil
 }
 
-func tryRelay(peer *phonebook.Peer, opts *Options) (*Result, error) {
+func tryRelay(target string, peer *phonebook.Peer, opts *Options) (*Result, error) {
 	if peer.Version < RelayProtocolVersion {
 		opts.Log("[network] peer's client does not support the relay")
 		return nil, fmt.Errorf("%w: no direct path and the peer predates relay support", ErrUnreachable)
@@ -342,7 +356,9 @@ func tryRelay(peer *phonebook.Peer, opts *Options) (*Result, error) {
 
 	opts.Log("[network] relay connection established")
 	opts.Debug("relay paired with %s", session.PeerID)
-	return &Result{Conn: session.Conn, Path: PathRelay, Detail: "relay", HostID: peer.ID, Fingerprint: peer.Fingerprint}, nil
+	// session.PeerID is the relay's word for who it paired us with, and is used
+	// for logging only. The identity that must be PROVEN is still the target.
+	return &Result{Conn: session.Conn, Path: PathRelay, Detail: "relay", HostID: target, Fingerprint: peer.Fingerprint}, nil
 }
 
 // addressFamily summarises an endpoint for logging without printing the address.

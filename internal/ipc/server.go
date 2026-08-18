@@ -23,7 +23,7 @@ type Event struct {
 // Server exposes a localhost-only bridge. It is intentionally not exposed to
 // the network; P2P networking remains handled by the core.
 type Server struct {
-	Address string
+	Address   string
 	OnCommand func(Command)
 }
 

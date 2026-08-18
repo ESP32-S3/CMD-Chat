@@ -62,10 +62,10 @@ func TestDeriveIDMatchesStoredID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := deriveID(id.PublicKey); got != id.ID {
-		t.Fatalf("deriveID = %q, stored ID = %q", got, id.ID)
+	if got := DeriveID(id.PublicKey); got != id.ID {
+		t.Fatalf("DeriveID = %q, stored ID = %q", got, id.ID)
 	}
-	if !valid(id) {
+	if !Valid(id) {
 		t.Fatal("freshly created identity does not validate")
 	}
 }

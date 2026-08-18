@@ -24,14 +24,14 @@ jobs:
         with:
           go-version: '1.23'
       - name: gofmt
-        # Only the packages that are kept gofmt-clean; the older files in
-        # cmd/cmd-chat and internal/chat predate this check.
+        # The packages that are kept gofmt-clean. cmd/cmd-chat and a few of the
+        # older internal packages predate this check and are not listed yet.
         shell: bash
         run: |
           # Check whichever of these exist: a package may not be present on
           # every branch, and gofmt exits non-zero on a missing path.
           targets=""
-          for d in internal/phonebook internal/relay internal/connect; do
+          for d in internal/phonebook internal/relay internal/connect internal/e2ee internal/identity internal/auth internal/chat; do
             [ -d "$d" ] && targets="$targets $d"
           done
           [ -z "$targets" ] && exit 0
@@ -45,6 +45,10 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
+      - name: Test with the race detector
+        # The crypto and session packages are the ones with real concurrency:
+        # one goroutine sends on a session while another receives.
+        run: go test -race ./internal/e2ee/... ./internal/chat/... ./internal/identity/...
       - name: Build
         # -o is required. Without it the output is named "cmd-chat", which
         # collides with the CMD-Chat/ launcher directory at the repository root

@@ -84,13 +84,70 @@ It never installs anything, never interrupts a chat, and **sends nothing about y
 
 To turn it off, set the environment variable `CMD_CHAT_NO_UPDATE_CHECK=1`.
 
+## Pick a nickname
+
+By default you show up as your Windows or Mac account name. To change it:
+
+```text
+/nick Alex
+```
+
+Everyone in a chat sees **Alex** next to your messages from then on.
+
+Your nickname is stored **on your own computer only**. It is not in the phonebook, not in any database, and nobody can look it up from your ID. It travels only to the people you are actually chatting with, inside the encrypted connection.
+
+Type `/nick` with nothing after it to go back to your account name.
+
+## Group chats
+
+More than one person can join you at once, and everyone in the room sees everyone else.
+
+There is nothing to set up. Whoever gets connected to first is hosting the room, and **the room is that person's ID**.
+
+To add a third person, type:
+
+```text
+/invite
+```
+
+CMD-Chat shows the ID to share. This matters: if you joined someone else, the ID to share is **theirs**, not yours — sharing your own would start a separate chat with you instead. `/invite` tells you which is which.
+
+To see who is in the room:
+
+```text
+/who
+```
+
+You will see people arrive and leave:
+
+```text
+* Jordan joined - 3 here
+* Sam left - 2 here
+```
+
+### Turning group chat off
+
+If you are hosting and want one-to-one only:
+
+```text
+/group off
+```
+
+Anyone already in the room stays; the next person who tries is told you are not accepting others. Turn it back on with `/group on`. The setting is remembered on your computer.
+
+Only the host of a room controls this.
+
 ## Other things you can type
 
 ```text
-?        help
-/id      show your ID again
-/debug   open a debug terminal that records a crash log
-/quit    leave a chat, or close CMD-Chat
+?              help
+/id            show your ID again
+/nick NAME     set the name others see
+/who           list who is in the room
+/invite        show the ID that invites someone into this room
+/group on|off  allow more than one person in (host only)
+/debug         open a debug terminal that records a crash log
+/quit          leave a chat, or close CMD-Chat
 ```
 
 ### Important

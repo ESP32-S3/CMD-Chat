@@ -231,11 +231,15 @@ func TestIssuedAtIsStrictlyMonotonic(t *testing.T) {
 }
 
 func TestLookupParsesPeer(t *testing.T) {
+	// The directory's answer has to be self-consistent: the ID it returns must
+	// be the one that was asked for, and the public key must derive it.
+	target := newIdentity(t)
+
 	rec := &recorder{}
 	server := newTestServer(t, rec, func(w http.ResponseWriter, r *http.Request, _ string) {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true, "id": "cc-AAAAAAAAAAAAAAAA", "online": true,
-			"public_key":          "TEOZNabz0XpNzrl9Bhxexshebq/6hVlYT7GnWecAJLE=",
+			"ok": true, "id": target.ID, "online": true,
+			"public_key":          base64.StdEncoding.EncodeToString(target.PublicKey),
 			"session_fingerprint": strings.Repeat("a", 64),
 			"protocol_version":    1,
 			"last_seen":           1700000000,
@@ -249,7 +253,7 @@ func TestLookupParsesPeer(t *testing.T) {
 	defer server.Close()
 
 	client := New(newIdentity(t), server.URL)
-	peer, err := client.Lookup(context.Background(), "cc-AAAAAAAAAAAAAAAA")
+	peer, err := client.Lookup(context.Background(), target.ID)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
@@ -503,5 +507,59 @@ func TestNewUsesDefaultBaseURLWhenEmpty(t *testing.T) {
 	}
 	if New(newIdentity(t), "https://example.test/").BaseURL != "https://example.test" {
 		t.Fatal("trailing slash should be trimmed")
+	}
+}
+
+// A directory that answers a lookup with a DIFFERENT peer must be refused.
+//
+// This is the first-contact defence. On a first connection the trust store has
+// nothing to compare against, so a substituted entry here would be pinned and
+// then faithfully authenticated: the caller really would be talking to the
+// identity the directory handed it. The ID the user typed is the only value in
+// this exchange that the directory does not control, so everything is checked
+// against that.
+func TestLookupRefusesAnAnswerForADifferentPeer(t *testing.T) {
+	wanted, substituted := newIdentity(t), newIdentity(t)
+
+	server := newTestServer(t, &recorder{}, func(w http.ResponseWriter, r *http.Request, _ string) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "id": substituted.ID, "online": true,
+			"public_key":          base64.StdEncoding.EncodeToString(substituted.PublicKey),
+			"session_fingerprint": strings.Repeat("a", 64),
+			"protocol_version":    2,
+			"candidates":          []map[string]any{},
+		})
+	})
+	defer server.Close()
+
+	client := New(newIdentity(t), server.URL)
+	_, err := client.Lookup(context.Background(), wanted.ID)
+	if err == nil {
+		t.Fatal("a lookup answered with someone else's entry was accepted")
+	}
+	if !errors.Is(err, ErrDirectoryMismatch) {
+		t.Fatalf("got %v, want ErrDirectoryMismatch", err)
+	}
+}
+
+// A directory that keeps the right ID but swaps the public key must also be
+// refused: the ID is a hash of the key, so the two cannot disagree honestly.
+func TestLookupRefusesAKeyThatDoesNotDeriveTheID(t *testing.T) {
+	wanted, other := newIdentity(t), newIdentity(t)
+
+	server := newTestServer(t, &recorder{}, func(w http.ResponseWriter, r *http.Request, _ string) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "id": wanted.ID, "online": true,
+			"public_key":          base64.StdEncoding.EncodeToString(other.PublicKey),
+			"session_fingerprint": strings.Repeat("a", 64),
+			"protocol_version":    2,
+			"candidates":          []map[string]any{},
+		})
+	})
+	defer server.Close()
+
+	client := New(newIdentity(t), server.URL)
+	if _, err := client.Lookup(context.Background(), wanted.ID); !errors.Is(err, ErrDirectoryMismatch) {
+		t.Fatalf("got %v, want ErrDirectoryMismatch", err)
 	}
 }

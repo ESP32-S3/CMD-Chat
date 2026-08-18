@@ -95,15 +95,15 @@ func TestChatOverArbitraryTransportIsOpaque(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		conn, dec, err := ClientConn(tap, host.Fingerprint, hostIdent.ID, guestIdent.ID, "guestuser", guestIdent)
+		conn, err := ClientConn(tap, host.Fingerprint, hostIdent.ID, "guestuser", guestIdent)
 		if err != nil {
 			done <- err
 			return
 		}
 		defer conn.Close()
 
-		var hello Packet
-		if err := dec.Decode(&hello); err != nil {
+		hello, err := conn.Receive()
+		if err != nil {
 			done <- err
 			return
 		}
@@ -113,14 +113,26 @@ func TestChatOverArbitraryTransportIsOpaque(t *testing.T) {
 		}
 
 		// The host broadcasts once a client is attached; wait for that message.
-		var msg Packet
-		if err := dec.Decode(&msg); err != nil {
-			done <- err
+		//
+		// Roster and system packets legitimately arrive first now that a room can
+		// hold more than two people, so read past anything that is not a message
+		// rather than assuming the next packet is the one under test.
+		for range 16 {
+			msg, err := conn.Receive()
+			if err != nil {
+				done <- err
+				return
+			}
+			if msg.Type != "msg" {
+				continue
+			}
+			if msg.Text != secret {
+				t.Errorf("received %q, want %q", msg.Text, secret)
+			}
+			done <- nil
 			return
 		}
-		if msg.Text != secret {
-			t.Errorf("received %q, want %q", msg.Text, secret)
-		}
+		t.Error("no message packet arrived within 16 packets")
 		done <- nil
 	}()
 
@@ -181,7 +193,7 @@ func TestClientConnRejectsFingerprintMismatch(t *testing.T) {
 	go host.HandleConn(serverSide)
 
 	wrong := strings.Repeat("ab", 32)
-	_, _, err = ClientConn(clientSide, wrong, hostIdent.ID, guestIdent.ID, "guestuser", guestIdent)
+	_, err = ClientConn(clientSide, wrong, hostIdent.ID, "guestuser", guestIdent)
 	if err == nil {
 		t.Fatal("expected the handshake to fail on a fingerprint mismatch")
 	}
@@ -206,7 +218,7 @@ func TestClientConnRejectsWrongHostIdentity(t *testing.T) {
 	serverSide, clientSide := net.Pipe()
 	go host.HandleConn(serverSide)
 
-	_, _, err = ClientConn(clientSide, host.Fingerprint, impostor.ID, guestIdent.ID, "guestuser", guestIdent)
+	_, err = ClientConn(clientSide, host.Fingerprint, impostor.ID, "guestuser", guestIdent)
 	if err == nil {
 		t.Fatal("expected the handshake to fail when the host is not who we asked for")
 	}
