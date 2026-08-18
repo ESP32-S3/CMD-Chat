@@ -13,7 +13,7 @@
  * authorisation, and the ID proves which key is allowed to speak for it.
  */
 
-import { SIGNING_PREFIX } from './config.js';
+import { SIGNING_PREFIX, SIGNING_PREFIX_V2 } from './config.js';
 
 const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
@@ -101,4 +101,13 @@ export async function verifyEd25519(publicKeyBytes, signatureBytes, message) {
 	} catch {
 		return false;
 	}
+}
+
+
+/**
+ * The v2 signed string. Same shape as v1 with a different prefix, so a signature
+ * for one protocol can never verify under the other.
+ */
+export function signingStringV2(method, path, issuedAt, bodyHashHex) {
+	return [SIGNING_PREFIX_V2, method.toUpperCase(), path, String(issuedAt), bodyHashHex].join('\n');
 }

@@ -54,9 +54,12 @@ func BaseURL() string {
 	return DefaultBaseURL
 }
 
-// signingPrefix domain-separates phonebook signatures from the CMD-CHAT/1
-// handshake signatures in internal/auth, so neither can be replayed as the other.
-const signingPrefix = "cmd-chat-phonebook/v1"
+// signingPrefix domain-separates phonebook signatures from every other
+// signature in CMD-Chat, so none can be replayed as another.
+//
+// The v2 prefix goes with the v2 endpoints and the derived write key. A v1
+// signature can never be accepted as a v2 one, or the reverse.
+const signingPrefix = "cmd-chat-phonebook/v2"
 
 const (
 	signatureHeader = "X-CmdChat-Signature"
@@ -68,9 +71,16 @@ const (
 const (
 	KindHost            = "host"
 	KindServerReflexive = "server_reflexive"
-	// KindServerReflexiveHTTP is added by the Worker itself: the public IP it
-	// saw. It carries no port, because the source port of an HTTPS request is
-	// not the port a hole-punching socket will use.
+	// KindServerReflexiveHTTP was the public IP the Worker itself observed and
+	// stored.
+	//
+	// Nothing produces it any more. It was the single most direct
+	// identity-to-location record in the directory — written for every peer that
+	// registered, including ones that published no addresses at all — and it was
+	// never read back, because only 'host' candidates are ever dialled. The
+	// Worker now reports the observed address to the caller and stores nothing.
+	//
+	// The constant remains so a v1 entry from an older client still parses.
 	KindServerReflexiveHTTP = "server_reflexive_http"
 )
 
@@ -82,6 +92,14 @@ var (
 	ErrOffline = errors.New("phonebook: peer is offline")
 	// ErrNotRegistered is returned by Heartbeat when the registration has lapsed.
 	ErrNotRegistered = errors.New("phonebook: no active registration")
+	// ErrHandleClaimed means another write key already owns this directory
+	// handle. See the trade documented in handle.go: it means somebody who knows
+	// this ID published under it first. It blocks wide-area discovery; it does
+	// not let them read or impersonate anything.
+	ErrHandleClaimed = errors.New("phonebook: this directory handle is already claimed by another key")
+	// ErrDirectoryOutdated means the directory Worker does not implement the
+	// blinded v2 endpoints yet.
+	ErrDirectoryOutdated = errors.New("phonebook: the directory has not been updated to the blinded protocol")
 	// ErrDirectoryMismatch means the directory answered a lookup with an entry
 	// that is not the one that was asked for. It is treated as a hostile
 	// directory, not as a transient fault, and the caller must not connect.
@@ -123,16 +141,20 @@ type Announcement struct {
 	ProtocolVersion int
 }
 
-// Peer is a resolved directory entry.
+// Peer is a resolved directory entry, after the sealed record has been opened.
+//
+// There is no PublicKey field any more, and there is deliberately nowhere to put
+// one. The directory no longer carries a peer's identity key, because it no
+// longer knows which identity an entry belongs to — and nothing needed it: the
+// ID is a hash of the key, and the CMDC2 handshake proves the key end to end.
 type Peer struct {
-	ID          string      `json:"id"`
-	Online      bool        `json:"online"`
-	PublicKey   string      `json:"public_key"`
-	Fingerprint string      `json:"session_fingerprint"`
-	Version     int         `json:"protocol_version"`
-	LastSeen    int64       `json:"last_seen"`
-	ExpiresAt   int64       `json:"expires_at"`
-	Candidates  []Candidate `json:"candidates"`
+	ID          string
+	Online      bool
+	Fingerprint string
+	Version     int
+	LastSeen    int64
+	ExpiresAt   int64
+	Candidates  []Candidate
 }
 
 // Registration is the outcome of a successful Register or Heartbeat.
@@ -154,10 +176,11 @@ func (r Registration) HeartbeatIntervalDuration() time.Duration {
 
 // Client talks to the phonebook on behalf of one identity.
 type Client struct {
-	BaseURL       string
-	HTTP          *http.Client
-	Identity      *identity.Identity
-	ClientVersion string
+	BaseURL         string
+	HTTP            *http.Client
+	Identity        *identity.Identity
+	derivedWriteKey ed25519.PrivateKey
+	ClientVersion   string
 
 	mu           sync.Mutex
 	lastIssuedAt int64
@@ -192,9 +215,16 @@ func (c *Client) nextIssuedAt() int64 {
 	return now
 }
 
-// sign produces the Ed25519 signature the Worker verifies. Only the signature
-// and the public key travel; the private key never leaves this process.
-func (c *Client) sign(method, path string, issuedAt int64, body []byte) string {
+// sign produces the Ed25519 signature the Worker verifies.
+//
+// It signs with the DERIVED write key, never the identity key. That is what
+// keeps the identity out of the directory: the Worker needs a public key to
+// verify against, and this one is unlinkable to who the writer actually is.
+func (c *Client) sign(method, path string, issuedAt int64, body []byte) (string, error) {
+	writeKey, err := c.writeKey()
+	if err != nil {
+		return "", err
+	}
 	sum := sha256.Sum256(body)
 	message := strings.Join([]string{
 		signingPrefix,
@@ -203,12 +233,34 @@ func (c *Client) sign(method, path string, issuedAt int64, body []byte) string {
 		strconv.FormatInt(issuedAt, 10),
 		hex.EncodeToString(sum[:]),
 	}, "\n")
-	return base64.StdEncoding.EncodeToString(c.Identity.Sign([]byte(message)))
+	return base64.StdEncoding.EncodeToString(ed25519.Sign(writeKey, []byte(message))), nil
 }
 
-func (c *Client) publicKey() string {
-	return base64.StdEncoding.EncodeToString(c.Identity.PublicKey)
+// writeKey returns the derived directory write key, computing it once.
+func (c *Client) writeKey() (ed25519.PrivateKey, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.derivedWriteKey == nil {
+		key, err := WriteKey(c.Identity)
+		if err != nil {
+			return nil, err
+		}
+		c.derivedWriteKey = key
+	}
+	return c.derivedWriteKey, nil
 }
+
+// writePublicKey is the base64 write key the Worker binds to this handle.
+func (c *Client) writePublicKey() (string, error) {
+	key, err := c.writeKey()
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey)), nil
+}
+
+// handle is this identity's own blinded directory key.
+func (c *Client) handle() (string, error) { return Handle(c.Identity.ID) }
 
 type apiEnvelope struct {
 	OK      bool   `json:"ok"`
@@ -220,15 +272,31 @@ type apiEnvelope struct {
 // JSON payload for the caller to decode.
 func (c *Client) do(ctx context.Context, method, path string, payload map[string]any) ([]byte, error) {
 	var body []byte
+	var signature string
 	if payload != nil {
-		payload["id"] = c.Identity.ID
-		payload["public_key"] = c.publicKey()
-		payload["issued_at"] = c.nextIssuedAt()
+		// The handle and the derived write key go on the wire. The CMD-Chat ID
+		// and the identity public key never do.
+		handle, err := c.handle()
+		if err != nil {
+			return nil, err
+		}
+		writePub, err := c.writePublicKey()
+		if err != nil {
+			return nil, err
+		}
+		issuedAt := c.nextIssuedAt()
+		payload["handle"] = handle
+		payload["write_key"] = writePub
+		payload["issued_at"] = issuedAt
+
 		encoded, err := json.Marshal(payload)
 		if err != nil {
 			return nil, err
 		}
 		body = encoded
+		if signature, err = c.sign(method, path, issuedAt, body); err != nil {
+			return nil, err
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, bytes.NewReader(body))
@@ -236,9 +304,8 @@ func (c *Client) do(ctx context.Context, method, path string, payload map[string
 		return nil, err
 	}
 	if body != nil {
-		issuedAt, _ := payload["issued_at"].(int64)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set(signatureHeader, c.sign(method, path, issuedAt, body))
+		req.Header.Set(signatureHeader, signature)
 	}
 
 	res, err := c.HTTP.Do(req)
@@ -264,6 +331,13 @@ func (c *Client) do(ctx context.Context, method, path string, payload map[string
 			return data, ErrOffline
 		case "not_registered":
 			return data, ErrNotRegistered
+		case "handle_claimed":
+			return data, ErrHandleClaimed
+		}
+		// A Worker that predates the blinded directory has no v2 routes at all.
+		// Say so, rather than reporting it as a mysterious 404.
+		if res.StatusCode == http.StatusNotFound && strings.HasPrefix(path, "/v2/") {
+			return data, ErrDirectoryOutdated
 		}
 		return data, &APIError{Status: res.StatusCode, Code: envelope.Error, Message: envelope.Message}
 	}
@@ -271,7 +345,12 @@ func (c *Client) do(ctx context.Context, method, path string, payload map[string
 }
 
 // Register publishes this identity's connection candidates, replacing any
-// previous entry for the same ID. Call it when hosting starts.
+// previous entry.
+//
+// Everything that could locate the user — every address, and the session
+// fingerprint — is sealed before it leaves this process. What the directory
+// receives is a blinded handle, an unlinkable write key, and a blob it cannot
+// read. See handle.go.
 func (c *Client) Register(ctx context.Context, a Announcement) (*Registration, error) {
 	if len(a.Candidates) == 0 {
 		return nil, errors.New("phonebook: refusing to register with no connection candidates")
@@ -280,16 +359,14 @@ func (c *Client) Register(ctx context.Context, a Announcement) (*Registration, e
 	if version <= 0 {
 		version = 1
 	}
-	payload := map[string]any{
-		"protocol_version": version,
-		"client_version":   c.ClientVersion,
-		"candidates":       a.Candidates,
-	}
-	if a.Fingerprint != "" {
-		payload["session_fingerprint"] = strings.ToLower(a.Fingerprint)
+
+	a.ProtocolVersion = version
+	_, sealed, err := SealAnnouncement(c.Identity.ID, a, c.ClientVersion)
+	if err != nil {
+		return nil, err
 	}
 
-	data, err := c.do(ctx, http.MethodPost, "/register", payload)
+	data, err := c.do(ctx, http.MethodPost, "/v2/publish", map[string]any{"sealed": sealed})
 	if err != nil {
 		return nil, err
 	}
@@ -297,13 +374,19 @@ func (c *Client) Register(ctx context.Context, a Announcement) (*Registration, e
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, err
 	}
+	// The Worker no longer stores the address it observed; it only reports it
+	// back so the caller can see its own public IP. Nothing is written down.
+	out.ID = c.Identity.ID
 	return &out, nil
 }
 
-// Heartbeat extends the registration TTL. It cannot change identity or
-// candidates; use Register for that.
+// Heartbeat extends the entry's TTL.
+//
+// This is the steady-state call, and it is deliberately the cheapest thing the
+// directory can do: one row touched, no ciphertext rewritten, nothing re-read.
+// Use Register when the sealed contents actually change.
 func (c *Client) Heartbeat(ctx context.Context) (*Registration, error) {
-	data, err := c.do(ctx, http.MethodPost, "/heartbeat", map[string]any{})
+	data, err := c.do(ctx, http.MethodPost, "/v2/touch", map[string]any{})
 	if err != nil {
 		return nil, err
 	}
@@ -311,62 +394,74 @@ func (c *Client) Heartbeat(ctx context.Context) (*Registration, error) {
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, err
 	}
+	out.ID = c.Identity.ID
 	return &out, nil
 }
 
-// Unregister revokes this identity's entry and destroys its stored addresses.
+// Unregister revokes this identity's entry and destroys the stored blob.
 func (c *Client) Unregister(ctx context.Context) error {
-	_, err := c.do(ctx, http.MethodDelete, "/register/"+c.Identity.ID, map[string]any{})
+	handle, err := c.handle()
+	if err != nil {
+		return err
+	}
+	_, err = c.do(ctx, http.MethodDelete, "/v2/entry/"+handle, map[string]any{})
 	if errors.Is(err, ErrNotFound) {
 		return nil
 	}
 	return err
 }
 
-// Lookup resolves another CMD-Chat ID. It returns ErrOffline when the peer is
-// known but stale, which callers should treat as "not reachable right now"
-// rather than as a hard failure.
+// Lookup resolves another CMD-Chat ID.
+//
+// The ID is never sent. It is blinded to a handle, the sealed entry that comes
+// back is opened locally, and an entry that will not open is treated exactly
+// like one for the wrong peer: ErrDirectoryMismatch, do not connect. That is
+// stronger than the v1 check it replaces — a hostile directory cannot even
+// return a well-formed answer for somebody else, because it cannot produce a
+// blob that opens under this ID's key.
 func (c *Client) Lookup(ctx context.Context, id string) (*Peer, error) {
 	if !ValidID(id) {
 		return nil, fmt.Errorf("phonebook: %q is not a valid CMD-Chat ID", id)
 	}
-	data, err := c.do(ctx, http.MethodGet, "/lookup/"+id, nil)
+	handle, err := Handle(id)
 	if err != nil {
 		return nil, err
 	}
-	var peer Peer
-	if err := json.Unmarshal(data, &peer); err != nil {
+
+	data, err := c.do(ctx, http.MethodGet, "/v2/entry/"+handle, nil)
+	if err != nil {
 		return nil, err
 	}
 
-	// The directory answers with an ID and a public key of its own choosing.
-	// Neither is believed.
-	//
-	// This matters most on FIRST contact, when the trust store has nothing to
-	// compare against: a hostile or compromised directory that answered a
-	// lookup for one ID with a different peer's ID would have the caller pin,
-	// and then authenticate, the wrong identity — and every cryptographic check
-	// downstream would pass, because the caller really would be talking to the
-	// identity it was handed.
-	if peer.ID != id {
-		return nil, fmt.Errorf("%w: asked for %s, the directory answered with %s", ErrDirectoryMismatch, id, peer.ID)
+	var response struct {
+		Sealed    string `json:"sealed"`
+		Online    bool   `json:"online"`
+		LastSeen  int64  `json:"last_seen"`
+		ExpiresAt int64  `json:"expires_at"`
 	}
-	if peer.PublicKey != "" {
-		raw, err := base64.StdEncoding.DecodeString(peer.PublicKey)
-		if err != nil || len(raw) != ed25519.PublicKeySize {
-			return nil, fmt.Errorf("%w: the directory returned an unusable public key for %s", ErrDirectoryMismatch, id)
-		}
-		if identity.DeriveID(ed25519.PublicKey(raw)) != id {
-			return nil, fmt.Errorf("%w: the directory returned a public key that does not derive %s", ErrDirectoryMismatch, id)
-		}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, err
 	}
-	return &peer, nil
+	if !response.Online {
+		return nil, ErrOffline
+	}
+
+	opened, err := open(id, handle, response.Sealed)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrDirectoryMismatch, err)
+	}
+
+	return &Peer{
+		ID:          id,
+		Online:      true,
+		Fingerprint: opened.Fingerprint,
+		Version:     opened.ProtocolVersion,
+		LastSeen:    response.LastSeen,
+		ExpiresAt:   response.ExpiresAt,
+		Candidates:  opened.Candidates,
+	}, nil
 }
 
-// KeepAlive heartbeats until ctx is cancelled. It is intended to run in a
-// goroutine for as long as the host is serving. Transient failures are reported
-// to onError (if set) but do not stop the loop; a lapsed registration is
-// re-established by calling renew.
 func (c *Client) KeepAlive(ctx context.Context, every time.Duration, renew func(context.Context) error, onError func(error)) {
 	if every <= 0 {
 		every = 60 * time.Second

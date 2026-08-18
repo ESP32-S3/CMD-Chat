@@ -213,6 +213,6 @@ describe('full discovery chain', () => {
 		const names = tables.results.map((t) => t.name);
 		expect(names).not.toContain('messages');
 		const appTables = names.filter((n) => !n.startsWith('_') && !n.startsWith('sqlite_') && n !== 'd1_migrations');
-		expect(appTables.sort()).toEqual(['candidates', 'rate_limits', 'registrations']);
+		expect(appTables.sort()).toEqual(['candidates', 'entries', 'rate_limits', 'registrations']);
 	});
 });

@@ -128,7 +128,11 @@ func (p *Peer) UDPEndpoints() []network.Endpoint {
 	return out
 }
 
-// ObservedIPs returns addresses the directory saw the peer connect from but for
+// ObservedIPs is retained for v1 entries only, and returns nothing for a peer
+// resolved from the blinded directory: the Worker no longer stores the address
+// it observed. See KindServerReflexiveHTTP.
+//
+// It returns addresses the directory saw the peer connect from but for
 // which no usable port is known. They are useful to pair with a known chat port
 // when the peer has forwarded one, and useless on their own.
 func (p *Peer) ObservedIPs() []string {

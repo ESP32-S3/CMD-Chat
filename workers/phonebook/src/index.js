@@ -17,9 +17,10 @@
  *   the connection fails; the phonebook deliberately does not paper over that.
  */
 
-import { PROTOCOL_VERSION, REGISTRATION_TTL_SECONDS } from './lib/config.js';
-import { authenticate, assertNotReplay } from './lib/auth.js';
+import { ENTRY_TTL_SECONDS, MAX_SEALED_CHARS, PROTOCOL_VERSION, REGISTRATION_TTL_SECONDS } from './lib/config.js';
+import { authenticate, authenticateV2, assertHandleOwner, assertNotReplay } from './lib/auth.js';
 import { garbageCollect, getAuthState, lookupRegistration, revokeRegistration, touchRegistration, upsertRegistration } from './lib/db.js';
+import { garbageCollectEntries, getEntryAuthState, lookupEntry, revokeEntry, touchEntry, upsertEntry } from './lib/entries.js';
 import { RequestError, fail, ok, preflight, readJsonBody } from './lib/http.js';
 import { enforceRateLimit, hashClientIp } from './lib/ratelimit.js';
 import {
@@ -27,8 +28,10 @@ import {
 	assertClientVersion,
 	assertCmdChatId,
 	assertFingerprint,
+	assertHandle,
 	assertNoSecretMaterial,
 	assertProtocolVersion,
+	assertSealed,
 	normaliseAddress,
 	rejectUnknownFields,
 } from './lib/validate.js';
@@ -36,6 +39,13 @@ import {
 const REGISTER_FIELDS = new Set(['id', 'public_key', 'issued_at', 'session_fingerprint', 'protocol_version', 'client_version', 'candidates']);
 const HEARTBEAT_FIELDS = new Set(['id', 'public_key', 'issued_at']);
 const DELETE_FIELDS = new Set(['id', 'public_key', 'issued_at']);
+
+// The v2 request shapes. Note what is absent: there is no 'id', no 'public_key',
+// and no 'candidates'. Addresses arrive sealed and the identity never arrives at
+// all.
+const PUBLISH_V2_FIELDS = new Set(['handle', 'write_key', 'issued_at', 'sealed']);
+const TOUCH_V2_FIELDS = new Set(['handle', 'write_key', 'issued_at']);
+const DELETE_V2_FIELDS = new Set(['handle', 'write_key', 'issued_at']);
 
 export default {
 	async fetch(request, env, ctx) {
@@ -51,7 +61,9 @@ export default {
 
 	/** Cron-driven expiry of stale registrations and spent rate-limit windows. */
 	async scheduled(event, env, ctx) {
-		ctx.waitUntil(garbageCollect(env.cmd_chat_phonebook, Math.floor(Date.now() / 1000)));
+		const now = Math.floor(Date.now() / 1000);
+		ctx.waitUntil(garbageCollect(env.cmd_chat_phonebook, now));
+		ctx.waitUntil(garbageCollectEntries(env.cmd_chat_phonebook, now));
 	},
 };
 
@@ -71,6 +83,11 @@ async function route(request, env, ctx) {
 			role: 'rendezvous directory only; chat traffic never transits this service',
 			protocol_version: PROTOCOL_VERSION,
 			registration_ttl: REGISTRATION_TTL_SECONDS,
+			// v2 is the blinded directory: no CMD-Chat ID and no address is
+			// stored in readable form. Clients check this to tell a current
+			// Worker from one that predates it.
+			blinded_entries: true,
+			entry_ttl: ENTRY_TTL_SECONDS,
 		});
 	}
 
@@ -81,6 +98,36 @@ async function route(request, env, ctx) {
 		if (request.method !== 'GET') return methodNotAllowed('GET');
 		return ok({ observed_ip: normaliseAddress(observedIp ?? '') , port_observable: false });
 	}
+
+	// ---------------------------------------------------------------------
+	// v2: the blinded directory. Keyed by handle; stores no ID and no address.
+	// ---------------------------------------------------------------------
+
+	if (path === '/v2/publish') {
+		if (request.method !== 'POST') return methodNotAllowed('POST');
+		return handlePublishV2(request, db, ctx, { ipHash, observedIp });
+	}
+
+	if (path === '/v2/touch') {
+		if (request.method !== 'POST') return methodNotAllowed('POST');
+		return handleTouchV2(request, db, { ipHash });
+	}
+
+	if (path.startsWith('/v2/entry/')) {
+		const handle = path.slice('/v2/entry/'.length);
+		if (request.method === 'GET') return handleEntryLookupV2(handle, db, { ipHash });
+		if (request.method === 'DELETE') return handleEntryDeleteV2(request, path, db, { ipHash });
+		return methodNotAllowed('GET or DELETE');
+	}
+
+	// ---------------------------------------------------------------------
+	// v1: the original ID-keyed directory.
+	//
+	// DEPRECATED. It stores a CMD-Chat ID alongside the peer's addresses, which
+	// is exactly the identity-to-location map v2 exists to remove. It is kept
+	// only so clients released before v2 keep working, and should be deleted
+	// once they are gone.
+	// ---------------------------------------------------------------------
 
 	if (path === '/register') {
 		if (request.method !== 'POST') return methodNotAllowed('POST');
@@ -138,11 +185,16 @@ async function handleRegister(request, db, ctx, { ipHash, observedIp }) {
 
 	// The address this Worker actually saw is worth publishing, because a peer
 	// behind NAT usually cannot discover it alone. Port is intentionally NULL.
+	// The observed IP is reported back to the caller but NEVER stored.
+	//
+	// It used to be appended to the candidate list and written to D1, which made
+	// the database hold an identity-to-public-IP mapping for every peer that
+	// registered — including peers that published no addresses of their own. It
+	// was also never used: the client only ever dials 'host' candidates, so
+	// nothing read it back. Removing it costs no functionality.
 	const observed = normaliseAddress(observedIp ?? '');
 	const stored = [...candidates];
-	if (observed && !stored.some((c) => c.address === observed && c.kind === 'server_reflexive_http')) {
-		stored.push({ kind: 'server_reflexive_http', transport: 'udp', address: observed, port: null, priority: 0 });
-	}
+
 
 	const { expiresAt, ttl } = await upsertRegistration(db, {
 		id,
@@ -277,4 +329,150 @@ async function handleDelete(request, path, db, { ipHash }) {
 
 	await revokeRegistration(db, id, now, issuedAt);
 	return ok({ id, revoked: true, already_revoked: existing.revoked_at !== null });
+}
+
+// ---------------------------------------------------------------------------
+// v2 handlers: the blinded directory.
+//
+// Read these next to migrations/0002_blinded_entries.sql. The short version is
+// that this Worker no longer knows who anyone is: it moves opaque handles and
+// opaque blobs, and the only thing it can decide is whether the caller holds the
+// key that owns a handle.
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /v2/publish
+ *
+ * Creates or refreshes a blinded entry. One row read, one row written.
+ */
+async function handlePublishV2(request, db, ctx, { ipHash, observedIp }) {
+	const nowMs = Date.now();
+	const now = Math.floor(nowMs / 1000);
+
+	const { body, raw } = await readJsonBody(request);
+	rejectUnknownFields(body, PUBLISH_V2_FIELDS, 'publish request');
+	assertNoSecretMaterial(body);
+
+	const { handle, writeKey, issuedAt } = await authenticateV2(request, '/v2/publish', body, raw, nowMs);
+	const sealed = assertSealed(body.sealed, MAX_SEALED_CHARS);
+
+	// The handle is the rate-limit subject in place of an ID. It gives the same
+	// per-peer protection without the directory learning who the peer is.
+	const limited = await enforceRateLimit(db, 'register', { ipHash, id: handle }, now);
+	if (limited) return limited;
+
+	const existing = await getEntryAuthState(db, handle);
+	assertHandleOwner(existing, writeKey);
+	assertNotReplay(issuedAt, existing?.last_issued_at);
+
+	const { expiresAt, ttl } = await upsertEntry(db, { handle, writeKey, sealed, now, issuedAt });
+
+	// Opportunistic cleanup so a Worker with no cron still self-cleans.
+	ctx.waitUntil(garbageCollectEntries(db, now));
+
+	return ok({
+		handle,
+		expires_at: expiresAt,
+		ttl,
+		heartbeat_interval: Math.floor(ttl / 3),
+		// Reported so the caller can see its own public address, and so it can
+		// choose to include it in the NEXT sealed entry. Never stored here.
+		observed_ip: normaliseAddress(observedIp ?? ''),
+	});
+}
+
+/**
+ * POST /v2/touch
+ *
+ * Extends an entry's lifetime. The cheapest call in the service: one row
+ * written, nothing read, no ciphertext rewritten.
+ *
+ * The authorisation is entirely in the UPDATE's WHERE clause — handle, write key,
+ * not revoked, and strictly-newer issued_at — so there is no read-then-write
+ * window, and a request that fails any of them changes nothing.
+ */
+async function handleTouchV2(request, db, { ipHash }) {
+	const nowMs = Date.now();
+	const now = Math.floor(nowMs / 1000);
+
+	const { body, raw } = await readJsonBody(request);
+	rejectUnknownFields(body, TOUCH_V2_FIELDS, 'touch request');
+	assertNoSecretMaterial(body);
+
+	const { handle, writeKey, issuedAt } = await authenticateV2(request, '/v2/touch', body, raw, nowMs);
+
+	const limited = await enforceRateLimit(db, 'heartbeat', { ipHash, id: handle }, now);
+	if (limited) return limited;
+
+	const { changed, expiresAt, ttl } = await touchEntry(db, { handle, writeKey, now, issuedAt });
+	if (!changed) {
+		// Indistinguishable on purpose: an unknown handle, one owned by another
+		// key, a revoked one, and a replayed request all look the same from here.
+		// The client's answer to all of them is the same too — publish again.
+		return fail(404, 'not_registered', 'No live entry for this handle; publish again.', { handle });
+	}
+
+	return ok({ handle, expires_at: expiresAt, ttl, heartbeat_interval: Math.floor(ttl / 3) });
+}
+
+/**
+ * GET /v2/entry/{handle}
+ *
+ * One row read. Returns the sealed blob and nothing else that could be
+ * correlated: no write key, no ID, and no address, because this Worker holds
+ * none of the last two and withholds the first.
+ */
+async function handleEntryLookupV2(rawHandle, db, { ipHash }) {
+	const now = Math.floor(Date.now() / 1000);
+	const handle = assertHandle(decodeURIComponent(rawHandle), 'lookup handle');
+
+	const limited = await enforceRateLimit(db, 'lookup', { ipHash, id: null }, now);
+	if (limited) return limited;
+
+	const found = await lookupEntry(db, handle, now);
+	if (!found) return fail(404, 'not_found', 'No such entry in the directory.', { online: false });
+
+	if (!found.online) {
+		return fail(404, 'offline', 'Entry exists but is not currently online.', {
+			online: false,
+			last_seen: found.row.last_seen,
+		});
+	}
+
+	return ok({
+		online: true,
+		sealed: found.row.sealed,
+		last_seen: found.row.last_seen,
+		expires_at: found.row.expires_at,
+	});
+}
+
+/**
+ * DELETE /v2/entry/{handle}
+ *
+ * Revokes an entry. The path handle must match the signed body handle, so a
+ * captured signature for one entry cannot be aimed at another.
+ */
+async function handleEntryDeleteV2(request, path, db, { ipHash }) {
+	const nowMs = Date.now();
+	const now = Math.floor(nowMs / 1000);
+
+	const pathHandle = assertHandle(decodeURIComponent(path.slice('/v2/entry/'.length)), 'path handle');
+
+	const { body, raw } = await readJsonBody(request);
+	rejectUnknownFields(body, DELETE_V2_FIELDS, 'delete request');
+	assertNoSecretMaterial(body);
+
+	const { handle, writeKey, issuedAt } = await authenticateV2(request, path, body, raw, nowMs);
+	if (handle !== pathHandle) {
+		return fail(403, 'handle_mismatch', 'Signed body handle does not match the handle in the path.');
+	}
+
+	const limited = await enforceRateLimit(db, 'delete', { ipHash, id: handle }, now);
+	if (limited) return limited;
+
+	const { changed } = await revokeEntry(db, { handle, writeKey, now, issuedAt });
+	if (!changed) return fail(404, 'not_found', 'No entry for this handle and key.', { handle });
+
+	return ok({ handle, revoked: true });
 }

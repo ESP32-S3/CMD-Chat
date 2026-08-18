@@ -36,7 +36,7 @@ Message plaintext exists only in the memory of the two people's own computers.
 |---|---|---|
 | Passive network observer / ISP | reads all traffic | sees ciphertext and timing only |
 | The relay Worker | reads, drops, delays, reorders, duplicates, injects | cannot read or forge a message; can deny service |
-| The D1 phonebook | chooses what a lookup returns, including keys and fingerprints | cannot substitute a peer for one the user asked for |
+| The D1 phonebook | chooses what a lookup returns | cannot substitute a peer for one the user asked for, and stores no identity and no address; see §10.1 |
 | Cloudflare | operates both of the above, and terminates TLS | same as the two rows above, combined |
 | An active MITM that terminates TLS on both sides | full control of both TLS sessions | **handshake fails**; see §5 |
 | An attacker who later steals a long-term identity key | offline, after the fact | cannot decrypt anything captured earlier; can impersonate going forward |
@@ -520,17 +520,67 @@ proven.
 
 End-to-end encryption does not hide metadata. It is not claimed to.
 
-### 10.1 The D1 phonebook can see
+### 10.1 The D1 phonebook
 
-* your CMD-Chat ID and your Ed25519 **public** key
-* your current TLS certificate fingerprint
-* your IP address candidates: LAN addresses, public IPv4/IPv6, STUN-discovered
-  endpoints, and the source IP of your HTTPS requests
-* when you come online, and roughly how long you stay (heartbeats)
-* **which IDs you look up**, and when — this reveals your social graph
-* your client's protocol version
+The directory is **blinded**. Nothing it stores identifies a person or a place.
+
+**What is in the database:**
+
+| Column | What it is |
+|---|---|
+| `handle` | `HKDF(your ID)` truncated to 128 bits. Derived by the client; the Worker never receives your ID |
+| `write_key` | an Ed25519 public key derived one-way from your identity's **private** seed — unlinkable to your identity key |
+| `sealed` | XChaCha20-Poly1305 over your addresses, fingerprint and protocol version, keyed by `HKDF(your ID)`. The Worker cannot open it |
+| timestamps | when the entry was created, last refreshed, and when it expires |
+
+There is **no CMD-Chat ID column, no identity public key, and no IP address in
+any readable form**. A dump of the table is a list of opaque handles and opaque
+blobs. This is asserted directly by
+`test/blinded.spec.js > stores no CMD-Chat ID and no address anywhere`, which
+dumps every table and greps it.
+
+**What Cloudflare's edge still sees, while serving a request:**
+
+* the source IP of every call — unavoidable, it terminates the connection
+* **which handle** you published or looked up, and when
+* therefore: that some IP is interested in some handle, and the timing of it
+
+So the *social graph by IP* is still visible to Cloudflare in the moment. What
+changed is that **none of it is written down**, and what is written down cannot
+be joined back to an identity.
+
+**What this does NOT defend against — targeted confirmation.** The derivation is
+deterministic. Somebody who **already has a specific ID** can compute its handle
+and its entry key, then check whether it is registered and read its addresses.
+Blinding defeats *bulk* extraction — enumerating users, dumping an
+identity-to-location map — not a check against an ID you already hold. Defeating
+that would need private information retrieval, which is out of all proportion to
+this service.
+
+**The deliberate trade.** v1 authorised a write by checking the supplied public
+key hashed to the ID being modified, so only the identity key could touch a row.
+A directory that does not know the ID cannot make that check. Instead the first
+writer of a handle binds its write key to it, and only that key may update it
+afterwards. So somebody who already knows your ID could claim your handle first
+and stop you publishing, or point your friends at an address they chose. They
+**cannot impersonate you** — CMDC2 authenticates the peer's real identity key end
+to end, and a wrong peer fails the handshake — and they cannot read anything. LAN
+discovery and the relay are unaffected.
 
 It **cannot** see message content, nicknames, or any session key.
+
+### 10.1.1 The relay still uses raw IDs
+
+The blinding above covers the **phonebook only**. The relay names each session
+after the host's CMD-Chat ID and authenticates with the identity key, so
+Cloudflare — which runs both services — still sees ID ↔ IP for anyone whose
+connection falls back to the relay.
+
+This is a known, unfixed gap, and it means the privacy win above is **partial for
+relayed users**. Applying the same handle derivation to the relay is the obvious
+next step; it carries its own trade, because the relay currently proves "only the
+host's key can claim the host slot" with exactly the public-key-to-ID check that
+blinding removes.
 
 ### 10.2 The relay can see
 
@@ -631,7 +681,9 @@ does **not** make keys unrecoverable from a compromised machine.
    pair. The second number is weak. Changing it would invalidate every ID people
    have already shared, so it stands, and safety numbers (§6.2) use the full key.
 3. **Group rooms are not group E2EE.** See §9.
-4. **Metadata is not hidden.** See §10.
+4. **Metadata is not hidden.** The phonebook is blinded and stores no identity
+   or address (§10.1), but Cloudflare's edge still observes request IPs and
+   timing, and the **relay still uses raw CMD-Chat IDs** (§10.1.1).
 5. **Headers are not encrypted.** See §7.3.
 6. **No at-rest protection on macOS/Linux without a passphrase.** See §11.
 7. **Post-quantum confidentiality only, not post-quantum authentication.** Key

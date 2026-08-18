@@ -128,25 +128,36 @@ func fakePhonebook(t *testing.T, respond func(w http.ResponseWriter, r *http.Req
 	return server.URL
 }
 
+// peerResponse serves a blinded directory answer for a peer.
+//
+// The directory no longer returns an ID, a key or an address: it returns a
+// sealed blob that only the requested ID can open. The fixture therefore has to
+// seal one, exactly as the real host would, or the client correctly refuses it.
 func peerResponse(w http.ResponseWriter, id string, version int, endpoints []string) {
-	candidates := make([]map[string]any, 0, len(endpoints))
+	candidates := make([]phonebook.Candidate, 0, len(endpoints))
 	for _, endpoint := range endpoints {
 		host, portStr, _ := net.SplitHostPort(endpoint)
 		var port int
 		_, _ = fmtSscan(portStr, &port)
-		candidates = append(candidates, map[string]any{
-			"kind": "host", "transport": "tcp", "address": host, "port": port, "priority": 100,
+		p := port
+		candidates = append(candidates, phonebook.Candidate{
+			Kind: "host", Transport: "tcp", Address: host, Port: &p, Priority: 100,
 		})
 	}
+
+	_, sealed, err := phonebook.SealAnnouncement(id, phonebook.Announcement{
+		Fingerprint:     strings.Repeat("a", 64),
+		Candidates:      candidates,
+		ProtocolVersion: version,
+	}, "test")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"ok": true, "id": id, "online": true,
-		// Omitted on purpose: these fixtures address reachability, not identity,
-		// and the directory client refuses a public key that does not derive the
-		// ID it accompanies. internal/phonebook covers that check directly.
-		"session_fingerprint": strings.Repeat("a", 64),
-		"protocol_version":    version,
-		"candidates":          candidates,
+		"ok": true, "online": true, "sealed": sealed,
 	})
 }
 
@@ -323,6 +334,10 @@ func TestJoinPinsTheIDTheCallerAskedFor(t *testing.T) {
 
 // A directory that answers with a different peer must abort the whole strategy,
 // not fall through to the relay with a substituted identity.
+//
+// Under the blinded directory this is stronger than it was: the substituted
+// entry is genuine and well-formed, and the client still refuses it, because a
+// blob sealed for one ID cannot be opened by another.
 func TestJoinAbortsWhenTheDirectoryAnswersWithADifferentPeer(t *testing.T) {
 	wanted := testIdentity(t).ID
 	substituted := testIdentity(t).ID

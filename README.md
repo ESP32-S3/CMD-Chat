@@ -48,6 +48,7 @@ There *are* two small always-on services, and neither is a chat server:
 
 - The [phonebook](#the-phonebook-finding-peers-across-networks) is a directory. It helps two peers find each other and then plays no part in the conversation. Chat traffic never passes through it, and on a LAN it is not used at all.
 - The [relay](#the-relay-when-a-direct-connection-is-impossible) is a blind byte pipe, used only when a direct connection is impossible. It forwards an end-to-end encrypted session it cannot read, holds no keys, and stores nothing.
+- The [phonebook](#the-phonebook-finding-people-outside-your-network) is **blinded**: it stores no CMD-Chat ID and no IP address in readable form, only an opaque handle and a blob it cannot open.
 
 Neither one can read your messages, keep your history, or host a room. The conversation still lives on the two computers having it.
 
@@ -223,9 +224,9 @@ changes it.
 A nickname is stored in `profile.json` next to your identity, **on your computer
 only**:
 
-- **It is never published.** The phonebook stores an ID, a public key, a
-  certificate fingerprint and short-lived addresses. A nickname is none of those,
-  and adding one would turn a directory of addresses into a directory of people.
+- **It is never published.** The phonebook stores an opaque handle and a blob it
+  cannot open — not even your ID reaches it. A nickname would be the one piece of
+  human-readable information in the whole directory.
   `TestNicknameNeverReachesThePhonebook` asserts this against the bytes the
   client actually sends.
 - **It only reaches people you are chatting with**, inside the authenticated
@@ -320,19 +321,28 @@ direct encrypted peer-to-peer chat
 
 **The phonebook is a directory, not a chat server.** It answers one question — *"where might I reach `cc-XXXX` right now?"* — and then gets out of the way. Your messages never touch it.
 
+**It is blinded.** It used to key your row by CMD-Chat ID and hang your IP
+addresses off it, which meant one `JOIN` produced a live map of identity to
+location for every user — readable by anyone holding the database. That is gone.
+
 What it does and does not hold:
 
-| Stored                                              | Never stored                          |
-| --------------------------------------------------- | ------------------------------------- |
-| Your CMD-Chat ID and public key                      | Chat messages of any kind             |
-| This session's TLS certificate fingerprint           | Private keys, seeds, passwords, tokens |
-| A short-lived list of address candidates             | Raw IP addresses as your identity      |
-| Timestamps used for expiry                           | Display names, email, any profile data |
+| Stored                                               | Never stored                            |
+| ---------------------------------------------------- | --------------------------------------- |
+| An opaque **handle**: `HKDF(your ID)`, 128 bits       | Your CMD-Chat ID, in any column         |
+| A **write key** derived from your identity's private seed — unlinkable to you | Your identity public key |
+| A **sealed blob** the service cannot open, holding your addresses and fingerprint | Any IP address in readable form |
+| Timestamps used for expiry                           | Chat messages, private keys, nicknames  |
+
+Your friend derives the same handle from the ID you gave them, fetches the blob,
+and opens it locally — so the directory does its job while learning neither who
+you are nor where you are.
 
 Key properties:
 
-- **Your ID is stable; your listing is not.** The ID is derived from your public key and never changes. The listing is a temporary registration that expires **five minutes** after your last heartbeat, and the addresses in it are destroyed when it lapses or when you stop hosting.
-- **Only you can change your own entry.** Every write is signed with your Ed25519 identity key, and your ID is a hash of the matching public key, so nobody can register, refresh, or delete a listing they don't hold the key for. The private key never leaves your device.
+- **Your ID is stable; your listing is not.** The ID never changes. The listing is temporary and expires **fifteen minutes** after your last heartbeat.
+- **Only you can change your own entry.** Every write is signed with a key derived from your identity's private seed. The identity key itself never goes near the directory, and the private key never leaves your device.
+- **What blinding does not do.** The derivation is deterministic, so somebody who *already has your ID* can compute your handle and read your entry. It defeats bulk extraction — enumerating users, dumping an identity-to-address map — not a check against an ID they already hold. And Cloudflare's edge still sees the source IP of every request in the moment; what changed is that none of it is written down. Full detail in [SECURITY.md §10.1](SECURITY.md).
 - **Direct peer-to-peer is still the preferred transport.** The phonebook only supplies the address to dial and the TLS fingerprint to pin. The chat connection itself is the same direct, pinned, mutually-authenticated TLS 1.3 session used on a LAN.
 - **Discovery is not reachability.** Finding a peer in the phonebook does not mean you can *reach* them directly. On restrictive networks — symmetric NAT, CGNAT, strict corporate firewalls — the direct connection still fails, and CMD-Chat falls back to the relay.
 

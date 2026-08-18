@@ -3,6 +3,37 @@
 A Cloudflare Worker + D1 database that acts as the **public phonebook / rendezvous directory** for
 [CMD-Chat](../../README.md), a peer-to-peer terminal chat application.
 
+## v2: the blinded directory
+
+**Deploy order matters.** The v2 endpoints must exist before any client that
+speaks them ships:
+
+```
+npx wrangler d1 migrations apply cmd-chat-phonebook --remote
+npx wrangler deploy
+```
+
+v1 (`/register`, `/heartbeat`, `/lookup/:id`) keeps working throughout, so
+clients released before v2 are unaffected and can be retired later.
+
+The directory no longer stores a CMD-Chat ID or any IP address in readable form.
+Each peer is one row:
+
+| Column      | What it is                                                                |
+| ----------- | ------------------------------------------------------------------------- |
+| `handle`    | `HKDF(CMD-Chat ID)` truncated to 128 bits, derived by the client           |
+| `write_key` | Ed25519 public key derived from the identity's **private** seed; unlinkable |
+| `sealed`    | XChaCha20-Poly1305 over the addresses and fingerprint, keyed by `HKDF(ID)` |
+
+This Worker cannot open `sealed`, cannot derive a handle (it never sees an ID),
+and cannot map an entry to a person. See
+`migrations/0002_blinded_entries.sql` for the full rationale, including what it
+does **not** hide and the write-authorisation trade it makes.
+
+Endpoints: `POST /v2/publish`, `POST /v2/touch`, `GET /v2/entry/{handle}`,
+`DELETE /v2/entry/{handle}`. Signing prefix `cmd-chat-phonebook/v2`, signed with
+the derived write key.
+
 ## What this is (and is not)
 
 ```

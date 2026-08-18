@@ -8,11 +8,47 @@
 /** Wire-protocol version this Worker speaks. */
 export const PROTOCOL_VERSION = 1;
 
-/** Domain-separation prefix for every signed request. */
+/** Domain-separation prefix for v1 signed requests (legacy endpoints). */
 export const SIGNING_PREFIX = 'cmd-chat-phonebook/v1';
 
-/** How long a registration stays visible after its last heartbeat (seconds). */
+/**
+ * Domain-separation prefix for v2 signed requests.
+ *
+ * A v1 signature can never be accepted as a v2 one, or the reverse: the prefix
+ * is the first line of the signed string, and the two protocols use different
+ * keys for different purposes.
+ */
+export const SIGNING_PREFIX_V2 = 'cmd-chat-phonebook/v2';
+
+/** How long a v1 registration stays visible after its last heartbeat (seconds). */
 export const REGISTRATION_TTL_SECONDS = 300;
+
+/**
+ * How long a v2 entry stays visible after its last heartbeat, in seconds.
+ *
+ * Longer than v1 on purpose. The client heartbeats every TTL/3, so this is
+ * directly a divisor on how many rows the directory writes: 900 means one write
+ * every five minutes per online host instead of one every hundred seconds.
+ *
+ * The cost is that a peer which drops off can stay listed for up to this long,
+ * so a guest may try a dead address before falling back. The connection strategy
+ * already handles that — every direct candidate is raced with a short timeout and
+ * the relay is the backstop — so the trade is a slightly slower first attempt in
+ * exchange for a third of the writes.
+ */
+export const ENTRY_TTL_SECONDS = 900;
+
+/**
+ * Maximum accepted sealed entry length, in base64 characters.
+ *
+ * Deliberately below MAX_BODY_BYTES so this check is the one that fires on an
+ * oversized entry, rather than the blunt body-size guard. A real entry is around
+ * 900 characters: eight candidates, a fingerprint and two version numbers.
+ *
+ * This is the base64 length; the Go client caps the raw sealed bytes at 2048,
+ * which encodes to 2732 characters.
+ */
+export const MAX_SEALED_CHARS = 2800;
 
 /**
  * How long a revoked (deleted) registration is kept as a tombstone before it is

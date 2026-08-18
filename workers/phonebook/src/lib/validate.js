@@ -31,9 +31,9 @@ export function assertCmdChatId(value, field = 'id') {
 	return value;
 }
 
-export function assertPublicKey(value) {
+export function assertPublicKey(value, field = 'public_key') {
 	if (typeof value !== 'string' || !PUBLIC_KEY_RE.test(value)) {
-		throw badRequest('invalid_public_key', "'public_key' must be a base64-encoded 32-byte Ed25519 public key.");
+		throw badRequest(field === 'public_key' ? 'invalid_public_key' : 'invalid_write_key', `'${field}' must be a base64-encoded 32-byte Ed25519 public key.`);
 	}
 	return value;
 }
@@ -187,4 +187,39 @@ export function assertCandidates(value) {
 	}
 
 	return out;
+}
+
+
+/**
+ * A v2 directory handle: exactly 26 RFC4648 base32 characters.
+ *
+ * This is HKDF(CMD-Chat ID) truncated to 128 bits, computed by the client. The
+ * Worker cannot derive or verify it against anything — that is the entire point —
+ * so all it can do is insist on the shape, which keeps the primary key
+ * well-formed and bounded.
+ */
+export function assertHandle(value, field = 'handle') {
+	if (typeof value !== 'string') throw badRequest('invalid_handle', `'${field}' must be a string.`);
+	if (!/^[A-Z2-7]{26}$/.test(value)) {
+		throw badRequest('invalid_handle', `'${field}' must be 26 base32 characters (A-Z, 2-7).`);
+	}
+	return value;
+}
+
+/**
+ * A sealed entry: canonical base64, bounded.
+ *
+ * The Worker never opens this and must never try. It checks the encoding so a
+ * malformed blob cannot be stored and served back to every reader, and the
+ * length so the directory cannot be used as free storage.
+ */
+export function assertSealed(value, maxChars) {
+	if (typeof value !== 'string') throw badRequest('invalid_sealed', "'sealed' must be a string.");
+	if (value.length < 48 || value.length > maxChars) {
+		throw badRequest('invalid_sealed', `'sealed' must be between 48 and ${maxChars} characters.`);
+	}
+	if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) {
+		throw badRequest('invalid_sealed', "'sealed' must be canonical base64.");
+	}
+	return value;
 }
